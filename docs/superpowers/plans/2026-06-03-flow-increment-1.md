@@ -979,8 +979,9 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     flow_node *sn = flow_get_node(f, e->source), *tn = flow_get_node(f, e->target);
     if (!sn || !tn) continue;
     flow_rect sr = flow_node_rect_abs(f, sn), tr = flow_node_rect_abs(f, tn);
-    flow_pt sa = { sr.x + sr.w - 1, sr.y + sr.h / 2 };   /* right-center of source */
-    flow_pt ta = { tr.x,            tr.y + tr.h / 2 };   /* left-center of target  */
+    flow_pt sa = { sr.x + sr.w, sr.y + sr.h / 2 };   /* one cell right of source border */
+    flow_pt ta = { tr.x - 1,    tr.y + tr.h / 2 };   /* one cell left of target border (so the
+                                                        arrowhead isn't overwritten by the node) */
     flow_pt ss = flow_to_screen(f, sa), ts = flow_to_screen(f, ta);
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
     if (!et) et = &flow_default_edge_type;
