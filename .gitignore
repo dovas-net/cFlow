@@ -1,1 +1,9 @@
 .DS_Store
+demos/hello_flow
+tests/test_smoke
+tests/test_geom
+tests/test_cell
+tests/test_model
+tests/test_route
+tests/test_render
+tests/test_input
