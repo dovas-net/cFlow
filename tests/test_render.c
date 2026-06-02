@@ -40,6 +40,20 @@ int main(void) {
   ASSERT(has_arrow, "edge renders an arrowhead");
   free(s2); flow_free(g);
 
+  /* minimap: bordered box in the BR corner with node dots inside */
+  flow_t *m = flow_new(40, 12); flow_register_defaults(m);
+  flow_add_node(m, "default", (flow_pt){0, 0}, (void*)"A");
+  flow_add_node(m, "default", (flow_pt){25, 8}, (void*)"B");
+  flow_set_minimap(m, 1, FLOW_CORNER_BR, 12, 6);
+  flow_cell *mb = (flow_cell*)malloc((size_t)40 * 12 * sizeof(flow_cell));
+  flow_render(m, mb, 40, 12);
+  ASSERT_INT(mb[6*40 + 28].ch, 0x250C, "minimap top-left corner at (28,6)");      /* 40-12, 12-6 */
+  ASSERT_INT(mb[6*40 + 39].ch, 0x2510, "minimap top-right corner");
+  int dots = 0;
+  for (int i = 0; i < 40 * 12; i++) { uint32_t c = mb[i].ch; if (c == 0x2022 || c == 0x25C9) dots++; }
+  ASSERT(dots >= 2, "minimap shows >=2 node dots");
+  free(mb); flow_free(m);
+
   free(buf);
   return flowtest_report("test_render");
 }

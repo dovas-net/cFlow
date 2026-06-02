@@ -43,6 +43,25 @@ flow_pt   flow_to_screen(flow_t *f, flow_pt world_abs);
 flow_pt   flow_to_world(flow_t *f, flow_pt screen);
 flow_viewport flow_view_get(flow_t *f);
 
+/* selection (single-select for now; `additive` reserved for shift-multi-select) */
+void flow_select_node(flow_t *f, int id, int additive);
+void flow_clear_selection(flow_t *f);
+int  flow_selected_node(flow_t *f);   /* first selected node id, or -1 */
+
+/* callbacks — the library/app seam (panel content stays app-side, like xyflow <Panel>) */
+typedef struct {
+  void (*on_overlay)(flow_t *f, flow_surface *screen, void *user);        /* draw HUD/panels last */
+  void (*on_node_context)(flow_t *f, int node, flow_pt screen, void *user);/* right-click on a node */
+  void (*on_node_click)(flow_t *f, int node, void *user);                  /* left-click (no drag)  */
+  void (*on_pane_click)(flow_t *f, flow_pt world, void *user);             /* left-click empty space */
+  void *user;
+} flow_callbacks;
+void flow_set_callbacks(flow_t *f, flow_callbacks cb);
+
+/* minimap widget */
+typedef enum { FLOW_CORNER_TL, FLOW_CORNER_TR, FLOW_CORNER_BL, FLOW_CORNER_BR } flow_corner;
+void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h);
+
 #ifdef FLOW_IMPLEMENTATION
 struct flow {
   flow_node *nodes; int nnodes, capnodes, nextid;
@@ -51,6 +70,9 @@ struct flow {
   const flow_edge_type **etypes; int netypes;
   flow_viewport view; int cols, rows; flow_cell *front; int running;
   int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
+  int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
+  flow_callbacks cb;
+  struct { int enabled, w, h; flow_corner corner; } minimap;
 };
 static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
   if (need <= *cap) return arr;
@@ -148,4 +170,14 @@ void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; }
 flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->view, world_abs); }
 flow_pt flow_to_world(flow_t *f, flow_pt screen) { return flow_unproject(f->view, screen); }
 flow_viewport flow_view_get(flow_t *f) { return f->view; }
+void flow_select_node(flow_t *f, int id, int additive) {
+  if (!additive) for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
+  flow_node *n = flow_get_node(f, id); if (n) n->flags |= FLOW_SELECTED;
+}
+void flow_clear_selection(flow_t *f) { for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED; }
+int flow_selected_node(flow_t *f) { for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) return f->nodes[i].id; return -1; }
+void flow_set_callbacks(flow_t *f, flow_callbacks cb) { f->cb = cb; }
+void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h) {
+  f->minimap.enabled = enabled; f->minimap.corner = corner; f->minimap.w = w; f->minimap.h = h;
+}
 #endif

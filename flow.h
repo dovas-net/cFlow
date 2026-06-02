@@ -200,6 +200,25 @@ flow_pt   flow_to_screen(flow_t *f, flow_pt world_abs);
 flow_pt   flow_to_world(flow_t *f, flow_pt screen);
 flow_viewport flow_view_get(flow_t *f);
 
+/* selection (single-select for now; `additive` reserved for shift-multi-select) */
+void flow_select_node(flow_t *f, int id, int additive);
+void flow_clear_selection(flow_t *f);
+int  flow_selected_node(flow_t *f);   /* first selected node id, or -1 */
+
+/* callbacks — the library/app seam (panel content stays app-side, like xyflow <Panel>) */
+typedef struct {
+  void (*on_overlay)(flow_t *f, flow_surface *screen, void *user);        /* draw HUD/panels last */
+  void (*on_node_context)(flow_t *f, int node, flow_pt screen, void *user);/* right-click on a node */
+  void (*on_node_click)(flow_t *f, int node, void *user);                  /* left-click (no drag)  */
+  void (*on_pane_click)(flow_t *f, flow_pt world, void *user);             /* left-click empty space */
+  void *user;
+} flow_callbacks;
+void flow_set_callbacks(flow_t *f, flow_callbacks cb);
+
+/* minimap widget */
+typedef enum { FLOW_CORNER_TL, FLOW_CORNER_TR, FLOW_CORNER_BL, FLOW_CORNER_BR } flow_corner;
+void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h);
+
 #ifdef FLOW_IMPLEMENTATION
 struct flow {
   flow_node *nodes; int nnodes, capnodes, nextid;
@@ -208,6 +227,9 @@ struct flow {
   const flow_edge_type **etypes; int netypes;
   flow_viewport view; int cols, rows; flow_cell *front; int running;
   int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
+  int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
+  flow_callbacks cb;
+  struct { int enabled, w, h; flow_corner corner; } minimap;
 };
 static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
   if (need <= *cap) return arr;
@@ -305,6 +327,16 @@ void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; }
 flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->view, world_abs); }
 flow_pt flow_to_world(flow_t *f, flow_pt screen) { return flow_unproject(f->view, screen); }
 flow_viewport flow_view_get(flow_t *f) { return f->view; }
+void flow_select_node(flow_t *f, int id, int additive) {
+  if (!additive) for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
+  flow_node *n = flow_get_node(f, id); if (n) n->flags |= FLOW_SELECTED;
+}
+void flow_clear_selection(flow_t *f) { for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED; }
+int flow_selected_node(flow_t *f) { for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) return f->nodes[i].id; return -1; }
+void flow_set_callbacks(flow_t *f, flow_callbacks cb) { f->cb = cb; }
+void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h) {
+  f->minimap.enabled = enabled; f->minimap.corner = corner; f->minimap.w = w; f->minimap.h = h;
+}
 #endif
 /* ===================== src/flow_route.h ===================== */
 /* ===== edge routing: orthogonal step router via path-connectivity glyphs ===== */
@@ -398,6 +430,41 @@ void flow_register_defaults(flow_t *f) {
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows);
 
 #ifdef FLOW_IMPLEMENTATION
+static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
+  int bw = f->minimap.w, bh = f->minimap.h;
+  if (bw < 4 || bh < 4) return;
+  int ox, oy;
+  switch (f->minimap.corner) {
+    case FLOW_CORNER_TL: ox = 0;          oy = 0;          break;
+    case FLOW_CORNER_TR: ox = cb->w - bw; oy = 0;          break;
+    case FLOW_CORNER_BL: ox = 0;          oy = cb->h - bh; break;
+    default:             ox = cb->w - bw; oy = cb->h - bh; break;  /* BR */
+  }
+  flow_surface s = { cb, ox, oy, bw, bh };
+  flow_box(&s, 0, 0, bw, bh, FLOW_FG, FLOW_BG, 0);
+  int iw = bw - 2, ih = bh - 2;
+  /* world window encompasses all nodes and the current screen rect */
+  flow_pt w0 = flow_to_world(f, (flow_pt){0, 0});
+  flow_rect vp = { w0.x, w0.y, cb->w, cb->h };          /* zoom==1 */
+  flow_rect W = f->nnodes ? flow_rect_union(flow_bounds(f), vp) : vp;
+  if (W.w < 1) W.w = 1; if (W.h < 1) W.h = 1;
+  /* viewport rectangle first, node dots on top */
+  int vx  = (vp.x - W.x) * iw / W.w,             vy  = (vp.y - W.y) * ih / W.h;
+  int vx2 = (vp.x + vp.w - 1 - W.x) * iw / W.w,  vy2 = (vp.y + vp.h - 1 - W.y) * ih / W.h;
+  if (vx < 0) vx = 0; if (vy < 0) vy = 0;
+  if (vx2 > iw - 1) vx2 = iw - 1; if (vy2 > ih - 1) vy2 = ih - 1;
+  for (int x = vx; x <= vx2; x++) { flow_put(&s, 1+x, 1+vy, 0x2500, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+x, 1+vy2, 0x2500, FLOW_FG, FLOW_BG, 0); }
+  for (int y = vy; y <= vy2; y++) { flow_put(&s, 1+vx, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+vx2, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); }
+  for (int i = 0; i < f->nnodes; i++) {
+    flow_node *n = &f->nodes[i]; flow_pt a = flow_node_abs(f, n);
+    int cx = a.x + n->w / 2, cy = a.y + n->h / 2;
+    int mx = (cx - W.x) * iw / W.w, my = (cy - W.y) * ih / W.h;
+    if (mx < 0) mx = 0; if (mx > iw - 1) mx = iw - 1;
+    if (my < 0) my = 0; if (my > ih - 1) my = ih - 1;
+    int sel = n->flags & FLOW_SELECTED;
+    flow_put(&s, 1+mx, 1+my, sel ? 0x25C9 : 0x2022, FLOW_FG, FLOW_BG, sel ? FLOW_BOLD : 0);  /* ◉ / • */
+  }
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
@@ -431,6 +498,9 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     flow_render_ctx ctx = { f->view.zoom, n->flags, 0 };
     nt->render(n, &surf, ctx);
   }
+
+  if (f->minimap.enabled) flow__minimap(f, &cb);
+  if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 }
 #endif
 /* ===================== src/flow_input.h ===================== */
@@ -481,17 +551,30 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     return;
   }
   flow_pt scr = { ev->x, ev->y };
-  if (ev->type == FLOW_MOUSE_PRESS && ev->button == 0) {
-    int id = flow_hit_node(f, scr);
-    if (id != -1) {
-      flow_node *nd = flow_get_node(f, id);
-      flow_pt w = flow_to_world(f, scr), a = flow_node_abs(f, nd);
-      f->drag_node = id; f->dragging_pan = 0;
-      f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;   /* cursor offset within node */
-    } else {
-      f->drag_node = -1; f->dragging_pan = 1; f->last_mouse = scr;
+  if (ev->type == FLOW_MOUSE_PRESS) {
+    if (ev->button == 2) {                       /* right-click: context, no drag */
+      int id = flow_hit_node(f, scr);
+      if (id != -1 && f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
+      return;
+    }
+    if (ev->button == 0) {                       /* arm a press; classify on move/release */
+      f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+      f->down_node = flow_hit_node(f, scr);
+      f->drag_node = -1; f->dragging_pan = 0;
     }
   } else if (ev->type == FLOW_MOUSE_MOTION) {
+    if (!f->mouse_down) return;
+    if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
+      f->moved = 1;                              /* threshold crossed: begin drag or pan */
+      if (f->down_node != -1) {
+        flow_node *nd = flow_get_node(f, f->down_node);
+        flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
+        f->drag_node = f->down_node; f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;
+        flow_select_node(f, f->down_node, 0);    /* selectNodesOnDrag */
+      } else {
+        f->dragging_pan = 1; f->last_mouse = f->down_pos;
+      }
+    }
     if (f->drag_node != -1) {
       flow_pt w = flow_to_world(f, scr);
       flow_move_node(f, f->drag_node, (flow_pt){ w.x - f->drag_grab.x, w.y - f->drag_grab.y });
@@ -500,7 +583,16 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->last_mouse = scr;
     }
   } else if (ev->type == FLOW_MOUSE_RELEASE) {
-    f->drag_node = -1; f->dragging_pan = 0;
+    if (f->mouse_down && !f->moved) {            /* a click, not a drag */
+      if (f->down_node != -1) {
+        flow_select_node(f, f->down_node, 0);
+        if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
+      } else {
+        flow_clear_selection(f);
+        if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
+      }
+    }
+    f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
   }
 }
 #endif

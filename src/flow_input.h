@@ -45,17 +45,30 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     return;
   }
   flow_pt scr = { ev->x, ev->y };
-  if (ev->type == FLOW_MOUSE_PRESS && ev->button == 0) {
-    int id = flow_hit_node(f, scr);
-    if (id != -1) {
-      flow_node *nd = flow_get_node(f, id);
-      flow_pt w = flow_to_world(f, scr), a = flow_node_abs(f, nd);
-      f->drag_node = id; f->dragging_pan = 0;
-      f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;   /* cursor offset within node */
-    } else {
-      f->drag_node = -1; f->dragging_pan = 1; f->last_mouse = scr;
+  if (ev->type == FLOW_MOUSE_PRESS) {
+    if (ev->button == 2) {                       /* right-click: context, no drag */
+      int id = flow_hit_node(f, scr);
+      if (id != -1 && f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
+      return;
+    }
+    if (ev->button == 0) {                       /* arm a press; classify on move/release */
+      f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+      f->down_node = flow_hit_node(f, scr);
+      f->drag_node = -1; f->dragging_pan = 0;
     }
   } else if (ev->type == FLOW_MOUSE_MOTION) {
+    if (!f->mouse_down) return;
+    if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
+      f->moved = 1;                              /* threshold crossed: begin drag or pan */
+      if (f->down_node != -1) {
+        flow_node *nd = flow_get_node(f, f->down_node);
+        flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
+        f->drag_node = f->down_node; f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;
+        flow_select_node(f, f->down_node, 0);    /* selectNodesOnDrag */
+      } else {
+        f->dragging_pan = 1; f->last_mouse = f->down_pos;
+      }
+    }
     if (f->drag_node != -1) {
       flow_pt w = flow_to_world(f, scr);
       flow_move_node(f, f->drag_node, (flow_pt){ w.x - f->drag_grab.x, w.y - f->drag_grab.y });
@@ -64,7 +77,16 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->last_mouse = scr;
     }
   } else if (ev->type == FLOW_MOUSE_RELEASE) {
-    f->drag_node = -1; f->dragging_pan = 0;
+    if (f->mouse_down && !f->moved) {            /* a click, not a drag */
+      if (f->down_node != -1) {
+        flow_select_node(f, f->down_node, 0);
+        if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
+      } else {
+        flow_clear_selection(f);
+        if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
+      }
+    }
+    f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
   }
 }
 #endif

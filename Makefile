@@ -1,7 +1,7 @@
 CC=cc
 CFLAGS=-std=c11 -O2 -Wall -Wextra
 LIBS=-lm
-TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input test_mouse
+TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input test_mouse test_select
 
 all: flow.h demos
 
@@ -10,6 +10,7 @@ flow.h: $(wildcard src/*.h) tools/amalgamate.sh
 
 demos: flow.h
 	$(CC) $(CFLAGS) demos/hello_flow.c -o demos/hello_flow $(LIBS)
+	$(CC) $(CFLAGS) demos/topo.c -o demos/topo $(LIBS)
 
 test: flow.h
 	@mkdir -p tests/snapshots

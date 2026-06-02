@@ -6,9 +6,10 @@ Dependency-free (pure ANSI escapes, `-lm` only).
 
 ## Status
 
-Increment 1 (foundation): nodes, edges, custom node/edge types, an orthogonal edge router,
-a damage-diffed cell compositor, arrow-key panning, and **mouse/trackpad interaction**
-(drag a node to move it, drag the canvas to pan, scroll/wheel to pan). See
+Working today: nodes, edges, custom node/edge types, an orthogonal edge router, a
+damage-diffed cell compositor, panning (arrows/drag/scroll), **mouse/trackpad interaction**
+(drag a node to move it; click to select; right-click for a details panel), and a **minimap**.
+Try the flagship demo: `./demos/topo` (a tiny network-topology editor). See
 `docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design and roadmap
 (zoom, selection, drag, connect, subflows, undo/redo, auto-layout, minimap).
 
