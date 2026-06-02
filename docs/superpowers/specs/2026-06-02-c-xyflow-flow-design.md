@@ -59,7 +59,7 @@ The research that grounds this spec found that the *system* core is itself **two
 │    flow_cell grid · flow_surface · z-ordered compose · damage diff    │
 │                                                                       │
 │  TERMINAL LAYER (the only part that needs a TTY)                      │
-│    raw-mode + SGR mouse/key decode (vendored from tuibox) ·           │
+│    raw-mode + enable escapes (from tuibox) + fresh SGR decode ·       │
 │    interaction state machine · flow_run / flow_present                │
 └─────────────────────────────────────────────────────────────────────┘
         ▲ consumed by
@@ -85,7 +85,7 @@ small, focused, independently understandable units). A trivial amalgamation step
 flow.h                  ← BUILD PRODUCT: amalgamated single header (committed)
 src/
   flow_vec.h            ← rxi/vec dynamic arrays (vendored, MIT)
-  flow_term.h           ← termios raw mode + SGR mouse/key decode (vendored from tuibox, MIT)
+  flow_term.h           ← termios raw mode + enable escapes (from tuibox, MIT) + fresh SGR decode
   flow_geom.h           ← pure: flow_pt/rect, transform, bounds, clamp, snap, hit-test math
   flow_cell.h           ← cell buffer, flow_surface, compose, damage diff
   flow_model.h          ← flow_t store, node/edge/handle/group, mutators, accessors
@@ -113,9 +113,13 @@ Makefile                ← amalgamate → build demos → build+run tests
 README.md               ← rewritten for flow (currently still tuibox's README)
 ```
 
-`tuibox.h` is **removed** from the repo; its ~100 lines of raw-mode setup and SGR decode are
-vendored into `flow_term.h` with attribution. `vec` (rxi) and the tuibox snippets are MIT;
-their license notices are retained in `flow.h`.
+`tuibox.h` is **removed** from the repo. What we reuse from it is small and specific: the
+termios raw-mode setup and the mouse/alt-screen enable-disable escapes (`?1003h`/`?1006h`/
+`?1049h`), ~30 lines, vendored into `flow_term.h` with attribution. tuibox's own SGR parser is
+**not** reused — it switches on the button code's first digit and extracts neither the
+Shift/Ctrl/Meta modifier bits nor right-click, all of which our multi-select, marquee, and
+drag-threshold logic need — so `flow_term.h` ships a **fresh SGR-1006 mouse/key decoder**.
+`vec` (rxi) and the tuibox snippets are MIT; their license notices are retained in `flow.h`.
 
 Single TU rule: exactly one translation unit `#define FLOW_IMPLEMENTATION` before including
 `flow.h`. Each demo and each test file does this.
@@ -492,7 +496,16 @@ flow_save / flow_load                                  flow_present  (diff + flu
 
 ## 15. Build order (all features in final scope)
 
-Phased only for sane sequencing — nothing is punted to a "later version."
+Phased only for sane sequencing — nothing is punted to a "later version." All 12 phases are in
+final scope. **Each increment is its own plan → build → validate cycle**, not one giant plan: a
+~15-module single-header library is multi-cycle work, so we write a focused implementation plan
+for one increment, build and validate it on real terminals, then plan the next.
+
+**Increment 1 is a thin vertical slice that de-risks the foundation**: phases 0–3 plus
+arrow-key pan — scaffold, pure core, the cell compositor + damage diff, default node/edge
+types, orthogonal routing, with green snapshot tests. It answers the one question everything
+downstream rides on — *does the compositor + diff renderer actually feel right on real
+terminals?* — before we invest in subflows, undo, zoom, or auto-layout.
 
 0. **Scaffold** — `src/` skeleton, vec + term vendored, amalgamate script, Makefile, `flowtest.h`.
 1. **Pure core** — geometry/transform, model + mutators, bounds, hit-test → `test_geom` green.
@@ -519,7 +532,10 @@ Tests grow with each phase.
 - **Zoom expectations.** "Full zoom" on a grid means spacing + LOD, not magnification; this is
   stated up front in README and the demo, with the glyph-size invariant made explicit.
 - **UTF-8 width.** Box-drawing and device glyphs may be wide/ambiguous; the compositor tracks
-  cell width and the default types stick to single-width glyphs to keep alignment exact.
+  cell width and the **default node/edge types use only single-width glyphs** to keep alignment
+  exact. The `topo` demo therefore uses single-width device markers (e.g. a letter or
+  box-drawing symbol), **not** the double-width emoji (`🖥`) sketched in the 2026-05-31 spec —
+  wide emoji would break cell alignment in the diff renderer.
 - **Scope.** Large but cohesive — every module shares the store/compositor/transform core, so
   the implementation plan stages it (§15) rather than splitting into independent specs.
 ```
