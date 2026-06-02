@@ -49,7 +49,99 @@ flow_rect flow_rect_union(flow_rect a, flow_rect b) {
 }
 #endif
 /* ===================== src/flow_cell.h ===================== */
-/* (module: filled in by a later task) */
+/* ===== cells, surface, box, utf8, damage diff ===== */
+enum { FLOW_BOLD = 1u, FLOW_REVERSE = 2u, FLOW_DIM = 4u, FLOW_UNDERLINE = 8u };
+#define FLOW_FG 7
+#define FLOW_BG 0
+typedef struct { uint32_t ch; uint8_t fg, bg, attr; } flow_cell;
+
+typedef struct { flow_cell *cells; int w, h; } flow_cellbuf;
+struct flow_surface { flow_cellbuf *cb; int ox, oy, w, h; };
+typedef struct flow_surface flow_surface;
+
+/* route output type — declared here so the edge vtable can reference it; impl in flow_route.h */
+typedef struct { uint32_t ch; int x, y; } flow_route_cell;
+typedef struct { flow_route_cell *cells; int count, cap; flow_pt label_anchor; } flow_route;
+
+int  flow_utf8(uint32_t cp, char out[5]);
+int  flow_utf8_decode(const char *s, uint32_t *cp);
+void flow_cellbuf_clear(flow_cellbuf *cb, uint8_t fg, uint8_t bg);
+void flow_cellbuf_put(flow_cellbuf *cb, int x, int y, uint32_t ch, uint8_t fg, uint8_t bg, uint8_t attr);
+void flow_put(flow_surface *s, int x, int y, uint32_t ch, uint8_t fg, uint8_t bg, uint8_t attr);
+void flow_text(flow_surface *s, int x, int y, const char *utf8, uint8_t fg, uint8_t bg, uint8_t attr);
+void flow_box(flow_surface *s, int x, int y, int w, int h, uint8_t fg, uint8_t bg, unsigned style);
+int  flow_surface_w(const flow_surface *s);
+int  flow_surface_h(const flow_surface *s);
+char *flow_diff_emit(const flow_cell *front, const flow_cell *back, int cols, int rows);
+
+#ifdef FLOW_IMPLEMENTATION
+int flow_utf8(uint32_t cp, char out[5]) {
+  if (cp < 0x80) { out[0] = (char)cp; out[1] = 0; return 1; }
+  if (cp < 0x800) { out[0] = (char)(0xC0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3F)); out[2] = 0; return 2; }
+  if (cp < 0x10000) { out[0] = (char)(0xE0 | (cp >> 12)); out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = (char)(0x80 | (cp & 0x3F)); out[3] = 0; return 3; }
+  out[0] = (char)(0xF0 | (cp >> 18)); out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+  out[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[3] = (char)(0x80 | (cp & 0x3F)); out[4] = 0; return 4;
+}
+int flow_utf8_decode(const char *s, uint32_t *cp) {
+  const unsigned char *u = (const unsigned char*)s;
+  if (u[0] < 0x80) { *cp = u[0]; return 1; }
+  if ((u[0] & 0xE0) == 0xC0) { *cp = ((uint32_t)(u[0]&0x1F)<<6)|(u[1]&0x3F); return 2; }
+  if ((u[0] & 0xF0) == 0xE0) { *cp = ((uint32_t)(u[0]&0x0F)<<12)|((uint32_t)(u[1]&0x3F)<<6)|(u[2]&0x3F); return 3; }
+  *cp = ((uint32_t)(u[0]&0x07)<<18)|((uint32_t)(u[1]&0x3F)<<12)|((uint32_t)(u[2]&0x3F)<<6)|(u[3]&0x3F); return 4;
+}
+void flow_cellbuf_clear(flow_cellbuf *cb, uint8_t fg, uint8_t bg) {
+  for (int i = 0; i < cb->w * cb->h; i++) { cb->cells[i].ch = ' '; cb->cells[i].fg = fg; cb->cells[i].bg = bg; cb->cells[i].attr = 0; }
+}
+void flow_cellbuf_put(flow_cellbuf *cb, int x, int y, uint32_t ch, uint8_t fg, uint8_t bg, uint8_t attr) {
+  if (x < 0 || y < 0 || x >= cb->w || y >= cb->h) return;
+  flow_cell *c = &cb->cells[y * cb->w + x]; c->ch = ch; c->fg = fg; c->bg = bg; c->attr = attr;
+}
+void flow_put(flow_surface *s, int x, int y, uint32_t ch, uint8_t fg, uint8_t bg, uint8_t attr) {
+  if (x < 0 || y < 0 || x >= s->w || y >= s->h) return;            /* logical clip to node box */
+  flow_cellbuf_put(s->cb, s->ox + x, s->oy + y, ch, fg, bg, attr); /* physical clip to buffer  */
+}
+void flow_text(flow_surface *s, int x, int y, const char *u, uint8_t fg, uint8_t bg, uint8_t attr) {
+  int i = 0; while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n; flow_put(s, x + i, y, cp, fg, bg, attr); i++; }
+}
+void flow_box(flow_surface *s, int x, int y, int w, int h, uint8_t fg, uint8_t bg, unsigned style) {
+  uint8_t a = (style & FLOW_BOLD) ? FLOW_BOLD : 0;
+  if (w < 2 || h < 2) return;
+  flow_put(s, x, y, 0x250C, fg, bg, a);
+  flow_put(s, x+w-1, y, 0x2510, fg, bg, a);
+  flow_put(s, x, y+h-1, 0x2514, fg, bg, a);
+  flow_put(s, x+w-1, y+h-1, 0x2518, fg, bg, a);
+  for (int i = 1; i < w-1; i++) { flow_put(s, x+i, y, 0x2500, fg, bg, a); flow_put(s, x+i, y+h-1, 0x2500, fg, bg, a); }
+  for (int j = 1; j < h-1; j++) { flow_put(s, x, y+j, 0x2502, fg, bg, a); flow_put(s, x+w-1, y+j, 0x2502, fg, bg, a); }
+}
+int flow_surface_w(const flow_surface *s) { return s->w; }
+int flow_surface_h(const flow_surface *s) { return s->h; }
+
+static void flow__sb(char **out, size_t *cap, size_t *len, const char *s, int n) {
+  if (*len + (size_t)n + 1 > *cap) { while (*len + (size_t)n + 1 > *cap) *cap *= 2; *out = (char*)realloc(*out, *cap); }
+  memcpy(*out + *len, s, n); *len += n; (*out)[*len] = 0;
+}
+char *flow_diff_emit(const flow_cell *front, const flow_cell *back, int cols, int rows) {
+  size_t cap = 64, len = 0; char *out = (char*)malloc(cap); out[0] = 0;
+  int cury = -1, curx = -1, have_style = 0; uint8_t lfg = 0, lbg = 0, lattr = 0;
+  char tmp[64], u[5];
+  for (int y = 0; y < rows; y++) for (int x = 0; x < cols; x++) {
+    int i = y * cols + x; flow_cell b = back[i], f = front[i];
+    if (b.ch == f.ch && b.fg == f.fg && b.bg == f.bg && b.attr == f.attr) continue;
+    if (y != cury || x != curx) { int n = snprintf(tmp, sizeof tmp, "\x1b[%d;%dH", y+1, x+1); flow__sb(&out,&cap,&len,tmp,n); }
+    if (!have_style || b.fg != lfg || b.bg != lbg || b.attr != lattr) {
+      int k = 0; k += snprintf(tmp+k, sizeof tmp-k, "\x1b[0");
+      if (b.attr & FLOW_BOLD) k += snprintf(tmp+k, sizeof tmp-k, ";1");
+      if (b.attr & FLOW_REVERSE) k += snprintf(tmp+k, sizeof tmp-k, ";7");
+      k += snprintf(tmp+k, sizeof tmp-k, ";38;5;%u;48;5;%um", b.fg, b.bg);
+      flow__sb(&out,&cap,&len,tmp,k); lfg=b.fg; lbg=b.bg; lattr=b.attr; have_style=1;
+    }
+    uint32_t ch = b.ch ? b.ch : ' '; int n = flow_utf8(ch, u); flow__sb(&out,&cap,&len,u,n);
+    curx = x + 1; cury = y;
+  }
+  return out;
+}
+#endif
 /* ===================== src/flow_model.h ===================== */
 /* (module: filled in by a later task) */
 /* ===================== src/flow_route.h ===================== */
