@@ -34,10 +34,22 @@ int flow_utf8(uint32_t cp, char out[5]) {
 }
 int flow_utf8_decode(const char *s, uint32_t *cp) {
   const unsigned char *u = (const unsigned char*)s;
+  /* Each continuation check short-circuits before the next byte is read, so a
+     truncated trailing sequence stops at the NUL instead of over-reading. */
   if (u[0] < 0x80) { *cp = u[0]; return 1; }
-  if ((u[0] & 0xE0) == 0xC0) { *cp = ((uint32_t)(u[0]&0x1F)<<6)|(u[1]&0x3F); return 2; }
-  if ((u[0] & 0xF0) == 0xE0) { *cp = ((uint32_t)(u[0]&0x0F)<<12)|((uint32_t)(u[1]&0x3F)<<6)|(u[2]&0x3F); return 3; }
-  *cp = ((uint32_t)(u[0]&0x07)<<18)|((uint32_t)(u[1]&0x3F)<<12)|((uint32_t)(u[2]&0x3F)<<6)|(u[3]&0x3F); return 4;
+  if ((u[0] & 0xE0) == 0xC0) {
+    if ((u[1] & 0xC0) != 0x80) { *cp = u[0]; return 1; }
+    *cp = ((uint32_t)(u[0]&0x1F)<<6)|(u[1]&0x3F); return 2;
+  }
+  if ((u[0] & 0xF0) == 0xE0) {
+    if ((u[1] & 0xC0) != 0x80 || (u[2] & 0xC0) != 0x80) { *cp = u[0]; return 1; }
+    *cp = ((uint32_t)(u[0]&0x0F)<<12)|((uint32_t)(u[1]&0x3F)<<6)|(u[2]&0x3F); return 3;
+  }
+  if ((u[0] & 0xF8) == 0xF0) {
+    if ((u[1]&0xC0)!=0x80 || (u[2]&0xC0)!=0x80 || (u[3]&0xC0)!=0x80) { *cp = u[0]; return 1; }
+    *cp = ((uint32_t)(u[0]&0x07)<<18)|((uint32_t)(u[1]&0x3F)<<12)|((uint32_t)(u[2]&0x3F)<<6)|(u[3]&0x3F); return 4;
+  }
+  *cp = u[0]; return 1;   /* invalid lead byte */
 }
 void flow_cellbuf_clear(flow_cellbuf *cb, uint8_t fg, uint8_t bg) {
   for (int i = 0; i < cb->w * cb->h; i++) { cb->cells[i].ch = ' '; cb->cells[i].fg = fg; cb->cells[i].bg = bg; cb->cells[i].attr = 0; }

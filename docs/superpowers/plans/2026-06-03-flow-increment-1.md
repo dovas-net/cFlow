@@ -389,10 +389,22 @@ int flow_utf8(uint32_t cp, char out[5]) {
 }
 int flow_utf8_decode(const char *s, uint32_t *cp) {
   const unsigned char *u = (const unsigned char*)s;
+  /* Each continuation check short-circuits before the next byte is read, so a
+     truncated trailing sequence stops at the NUL instead of over-reading. */
   if (u[0] < 0x80) { *cp = u[0]; return 1; }
-  if ((u[0] & 0xE0) == 0xC0) { *cp = ((u[0]&0x1F)<<6)|(u[1]&0x3F); return 2; }
-  if ((u[0] & 0xF0) == 0xE0) { *cp = ((u[0]&0x0F)<<12)|((u[1]&0x3F)<<6)|(u[2]&0x3F); return 3; }
-  *cp = ((u[0]&0x07)<<18)|((u[1]&0x3F)<<12)|((u[2]&0x3F)<<6)|(u[3]&0x3F); return 4;
+  if ((u[0] & 0xE0) == 0xC0) {
+    if ((u[1] & 0xC0) != 0x80) { *cp = u[0]; return 1; }
+    *cp = ((uint32_t)(u[0]&0x1F)<<6)|(u[1]&0x3F); return 2;
+  }
+  if ((u[0] & 0xF0) == 0xE0) {
+    if ((u[1] & 0xC0) != 0x80 || (u[2] & 0xC0) != 0x80) { *cp = u[0]; return 1; }
+    *cp = ((uint32_t)(u[0]&0x0F)<<12)|((uint32_t)(u[1]&0x3F)<<6)|(u[2]&0x3F); return 3;
+  }
+  if ((u[0] & 0xF8) == 0xF0) {
+    if ((u[1]&0xC0)!=0x80 || (u[2]&0xC0)!=0x80 || (u[3]&0xC0)!=0x80) { *cp = u[0]; return 1; }
+    *cp = ((uint32_t)(u[0]&0x07)<<18)|((uint32_t)(u[1]&0x3F)<<12)|((uint32_t)(u[2]&0x3F)<<6)|(u[3]&0x3F); return 4;
+  }
+  *cp = u[0]; return 1;   /* invalid lead byte */
 }
 void flow_cellbuf_clear(flow_cellbuf *cb, uint8_t fg, uint8_t bg) {
   for (int i = 0; i < cb->w * cb->h; i++) { cb->cells[i].ch = ' '; cb->cells[i].fg = fg; cb->cells[i].bg = bg; cb->cells[i].attr = 0; }
@@ -1272,6 +1284,20 @@ git rm tuibox.h demos/demo_basic.c demos/demo_bounce.c demos/demo_drag.c
 
 Run: `make clean && make && make test`
 Expected: `flow.h` regenerates; `demos/hello_flow` builds; every test prints `N passed, 0 failed`.
+
+- [ ] **Step 3b: Run the suite + demo under AddressSanitizer/UBSan (the C correctness gate)**
+
+`make test` checks behavior, not memory correctness. This is malloc/realloc/free-heavy code, so run the sanitizers too:
+
+```bash
+make flow.h
+for t in geom cell model route render input; do
+  cc -std=c11 -fsanitize=address,undefined -fno-sanitize-recover=all -g tests/test_$t.c -o /tmp/st_$t -lm && /tmp/st_$t || echo "SANITIZER FAIL $t"
+done
+cc -std=c11 -fsanitize=address,undefined -fno-sanitize-recover=all -g demos/hello_flow.c -o /tmp/st_demo -lm
+printf '\x1b[C\x1b[Bq' | /tmp/st_demo >/dev/null   # pan right, down, quit
+```
+Expected: no `SANITIZER FAIL` lines, no ASan/UBSan reports, demo exits 0. (A 1-cell pan shifts almost every cell, so the diff is near-full-screen — that is correct, not a bug; whether it *flickers* is the one thing only a human eye on a real terminal can judge.)
 
 - [ ] **Step 4: Commit**
 

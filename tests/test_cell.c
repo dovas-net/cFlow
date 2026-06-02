@@ -19,6 +19,9 @@ int main(void) {
   char u[5]; int n = flow_utf8(0x250C, u); ASSERT_INT(n, 3, "box char is 3 bytes");
   uint32_t cp; int m = flow_utf8_decode("A", &cp); ASSERT_INT(m, 1, "ascii 1 byte"); ASSERT_INT(cp, 'A', "ascii cp");
   m = flow_utf8_decode("\xe2\x94\x8c", &cp); ASSERT_INT(m, 3, "box decode bytes"); ASSERT_INT(cp, 0x250C, "box decode cp");
+  /* truncated trailing multibyte: a lone 3-byte lead before NUL must not over-read */
+  m = flow_utf8_decode("\xe2", &cp); ASSERT_INT(m, 1, "truncated lead consumes 1 byte"); ASSERT_INT(cp, 0xe2, "truncated lead cp");
+  m = flow_utf8_decode("\xe2\x94", &cp); ASSERT_INT(m, 1, "lead+1cont-before-NUL consumes 1 byte");
 
   /* surface put + box + text into a cell buffer */
   flow_cell buf[10 * 4];
