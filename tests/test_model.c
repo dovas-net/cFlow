@@ -44,5 +44,15 @@ int main(void) {
 
   flow_free(f);
 
+  /* default node type: data is a C-string label; measure = strlen+4 x 3 */
+  flow_t *g = flow_new(80, 24);
+  flow_register_defaults(g);
+  int d = flow_add_node(g, "default", (flow_pt){0,0}, (void*)"hi");
+  ASSERT_INT(flow_get_node(g, d)->w, 6, "default measure w = len('hi')+4");
+  ASSERT_INT(flow_get_node(g, d)->h, 3, "default measure h = 3");
+  ASSERT(flow_node_type_for(g, "default") != NULL, "default node type registered");
+  ASSERT(flow_edge_type_for(g, "default") != NULL, "default edge type registered");
+  flow_free(g);
+
   return flowtest_report("test_model");
 }
