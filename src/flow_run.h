@@ -13,16 +13,22 @@ void flow_present(flow_t *f) {
   free(back);
 }
 void flow_feed(flow_t *f, const char *b, int n) {
-  for (int i = 0; i + 2 < n; i++) {
-    if (b[i] == '\x1b' && b[i+1] == '[') {
-      switch (b[i+2]) {
-        case 'A': flow_pan(f, 0,  1); break;   /* up    */
-        case 'B': flow_pan(f, 0, -1); break;   /* down  */
-        case 'C': flow_pan(f, -1, 0); break;   /* right */
-        case 'D': flow_pan(f,  1, 0); break;   /* left  */
+  int i = 0;
+  while (i < n) {
+    if (b[i] == '\x1b' && i + 2 < n && b[i+1] == '[' && b[i+2] == '<') {
+      flow_mouse_event ev; int used = flow_parse_mouse(b + i, n - i, &ev);
+      if (used > 0) { flow_handle_mouse(f, &ev); i += used; continue; }
+    }
+    if (b[i] == '\x1b' && i + 2 < n && b[i+1] == '[') {
+      switch (b[i+2]) {                          /* arrow-key pan */
+        case 'A': flow_pan(f, 0,  1); i += 3; continue;   /* up    */
+        case 'B': flow_pan(f, 0, -1); i += 3; continue;   /* down  */
+        case 'C': flow_pan(f, -1, 0); i += 3; continue;   /* right */
+        case 'D': flow_pan(f,  1, 0); i += 3; continue;   /* left  */
         default: break;
       }
     }
+    i++;
   }
 }
 void flow_run(flow_t *f) {

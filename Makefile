@@ -1,7 +1,7 @@
 CC=cc
 CFLAGS=-std=c11 -O2 -Wall -Wextra
 LIBS=-lm
-TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input
+TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input test_mouse
 
 all: flow.h demos
 

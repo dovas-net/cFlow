@@ -12,10 +12,11 @@ void flow_term_setup(void) {
   struct termios raw; tcgetattr(STDIN_FILENO, &flow__saved_tio); raw = flow__saved_tio;
   raw.c_lflag &= ~(ECHO | ICANON);
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-  printf("\x1b[?1049h\x1b[2J\x1b[?25l"); fflush(stdout);   /* alt-screen, clear, hide cursor */
+  /* alt-screen, clear, hide cursor; enable SGR mouse (click+drag+wheel) */
+  printf("\x1b[?1049h\x1b[2J\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h"); fflush(stdout);
 }
 void flow_term_restore(void) {
-  printf("\x1b[0m\x1b[?25h\x1b[?1049l"); fflush(stdout);
+  printf("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l"); fflush(stdout);
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &flow__saved_tio);
 }
 int flow_term_size(int *cols, int *rows) {

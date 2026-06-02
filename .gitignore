@@ -7,3 +7,4 @@ tests/test_model
 tests/test_route
 tests/test_render
 tests/test_input
+tests/test_mouse

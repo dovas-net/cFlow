@@ -26,6 +26,7 @@ const flow_node_type *flow_node_type_for(flow_t *f, const char *type);
 const flow_edge_type *flow_edge_type_for(flow_t *f, const char *type);
 void    flow_measure_node(flow_t *f, flow_node *n);
 int     flow_add_node(flow_t *f, const char *type, flow_pt pos, void *data);
+void    flow_move_node(flow_t *f, int id, flow_pt pos);
 int     flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th);
 flow_node *flow_get_node(flow_t *f, int id);
 flow_edge *flow_get_edge(flow_t *f, int id);
@@ -49,6 +50,7 @@ struct flow {
   const flow_node_type **ntypes; int nntypes;
   const flow_edge_type **etypes; int netypes;
   flow_viewport view; int cols, rows; flow_cell *front; int running;
+  int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
 };
 static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
   if (need <= *cap) return arr;
@@ -58,6 +60,7 @@ static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
 flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
   f->view.zoom = 1; f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
+  f->drag_node = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
@@ -97,6 +100,10 @@ int flow_add_node(flow_t *f, const char *type, flow_pt pos, void *data) {
   n->id = f->nextid++; snprintf(n->type, sizeof n->type, "%s", type ? type : "default");
   n->pos = pos; n->parent = -1; n->data = data; flow_measure_node(f, n);
   return n->id;
+}
+void flow_move_node(flow_t *f, int id, flow_pt pos) {
+  flow_node *n = flow_get_node(f, id);
+  if (n) n->pos = pos;   /* increment 1/2a: top-level nodes only, so pos == absolute */
 }
 int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   if (src == dst) return -1;

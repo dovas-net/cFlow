@@ -7,7 +7,8 @@ Dependency-free (pure ANSI escapes, `-lm` only).
 ## Status
 
 Increment 1 (foundation): nodes, edges, custom node/edge types, an orthogonal edge router,
-a damage-diffed cell compositor, and arrow-key panning. See
+a damage-diffed cell compositor, arrow-key panning, and **mouse/trackpad interaction**
+(drag a node to move it, drag the canvas to pan, scroll/wheel to pan). See
 `docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design and roadmap
 (zoom, selection, drag, connect, subflows, undo/redo, auto-layout, minimap).
 
