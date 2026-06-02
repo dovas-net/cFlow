@@ -805,8 +805,10 @@ void flow_route_orthogonal(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_
     if (i < n - 1) m |= flow__dir(p[i+1].x - p[i].x, p[i+1].y - p[i].y);
     flow_route_push(out, p[i].x, p[i].y, flow__glyph(m));
   }
-  if (n > 0) {                      /* arrowhead at the target end */
-    int ax = t.x - p[n-1].x, ay = t.y - p[n-1].y;
+  if (n > 0) {                      /* arrowhead at the target end, pointing along the approach */
+    int ax, ay;
+    if (n >= 2) { ax = p[n-1].x - p[n-2].x; ay = p[n-1].y - p[n-2].y; }
+    else        { ax = t.x - s.x;           ay = t.y - s.y; }
     uint32_t arrow = ax > 0 ? 0x25B6 : ax < 0 ? 0x25C0 : ay > 0 ? 0x25BC : 0x25B2;
     out->cells[out->count - 1].ch = arrow;
     out->label_anchor = p[n/2];
