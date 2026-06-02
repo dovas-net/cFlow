@@ -1,13 +1,25 @@
-all: tuibox
-
 CC=cc
-
+CFLAGS=-std=c11 -O2 -Wall -Wextra
 LIBS=-lm
-CFLAGS=-O3 -pipe
-DEBUGCFLAGS=-Og -pipe -g
+TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input
 
-.PHONY: tuibox
-tuibox:
-	$(CC) demos/demo_basic.c -o demos/demo_basic $(LIBS) $(CFLAGS)
-	$(CC) demos/demo_bounce.c -o demos/demo_bounce $(LIBS) $(CFLAGS)
-	$(CC) demos/demo_drag.c -o demos/demo_drag $(LIBS) $(CFLAGS)
+all: flow.h demos
+
+flow.h: $(wildcard src/*.h) tools/amalgamate.sh
+	sh tools/amalgamate.sh
+
+demos: flow.h
+	$(CC) $(CFLAGS) demos/hello_flow.c -o demos/hello_flow $(LIBS)
+
+test: flow.h
+	@mkdir -p tests/snapshots
+	@fail=0; for t in $(TESTS); do \
+	  if [ -f tests/$$t.c ]; then \
+	    $(CC) $(CFLAGS) tests/$$t.c -o tests/$$t $(LIBS) || { echo "BUILD FAIL $$t"; fail=1; continue; }; \
+	    ./tests/$$t || fail=1; \
+	  fi; \
+	done; exit $$fail
+
+clean:
+	rm -f demos/hello_flow $(addprefix tests/,$(TESTS)) flow.h
+.PHONY: all demos test clean
