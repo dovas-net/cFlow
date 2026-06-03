@@ -65,6 +65,32 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
     flow_put(&s, 1+mx, 1+my, sel ? 0x25C9 : 0x2022, FLOW_FG, FLOW_BG, sel ? FLOW_BOLD : 0);  /* ◉ / • */
   }
 }
+/* nudge a (world) anchor one cell OUTSIDE the node along the handle's facing */
+static flow_pt flow__anchor_outward(flow_pt a, flow_pos pos) {
+  switch (pos) {
+    case FLOW_TOP:    a.y -= 1; break;
+    case FLOW_BOTTOM: a.y += 1; break;
+    case FLOW_LEFT:   a.x -= 1; break;
+    default:          a.x += 1; break;  /* RIGHT */
+  }
+  return a;
+}
+/* resolve an edge endpoint's handle: named id -> nearest by source/target kind ->
+   first handle (so flow_handle_anchor gives a side); NULL only if the type has none. */
+static const flow_handle *flow__edge_handle(flow_t *f, flow_node *n, const char *id, int want_source) {
+  int hc = flow_node_handle_count(f, n->id);
+  if (hc <= 0) return NULL;
+  if (id && id[0]) for (int j = 0; j < hc; j++) {            /* named match wins */
+    const flow_handle *h = flow_node_handle_at(f, n->id, j);
+    if (h && strncmp(h->id, id, sizeof h->id) == 0) return h;
+  }
+  flow_handle_kind kind = want_source ? FLOW_HANDLE_SOURCE : FLOW_HANDLE_TARGET;
+  for (int j = 0; j < hc; j++) {                             /* first matching kind */
+    const flow_handle *h = flow_node_handle_at(f, n->id, j);
+    if (h && (h->kind == kind || h->kind == FLOW_HANDLE_BOTH)) return h;
+  }
+  return flow_node_handle_at(f, n->id, 0);                   /* fall back to first */
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
@@ -77,14 +103,19 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     flow_edge *e = &flow_edges(f)[i];
     flow_node *sn = flow_get_node(f, e->source), *tn = flow_get_node(f, e->target);
     if (!sn || !tn) continue;
-    flow_rect sr = flow_node_rect_abs(f, sn), tr = flow_node_rect_abs(f, tn);
-    flow_pt sa = { sr.x + sr.w, sr.y + sr.h / 2 };   /* one cell right of source border */
-    flow_pt ta = { tr.x - 1,    tr.y + tr.h / 2 };   /* one cell left of target border  */
+    /* anchor on declared handles (named -> nearest source/target -> RIGHT/LEFT default) */
+    const flow_handle *sh = flow__edge_handle(f, sn, e->source_handle, 1);
+    const flow_handle *th = flow__edge_handle(f, tn, e->target_handle, 0);
+    flow_pos sp = sh ? sh->pos : FLOW_RIGHT, tp = th ? th->pos : FLOW_LEFT;
+    flow_pt sa = flow_handle_anchor(f, sn, sh), ta = flow_handle_anchor(f, tn, th);
+    /* route from one cell OUTSIDE each border (along the handle facing) so the
+       router's arrowhead lands clear of the node box (edges draw under nodes). */
+    sa = flow__anchor_outward(sa, sp); ta = flow__anchor_outward(ta, tp);
     flow_pt ss = flow_to_screen(f, sa), ts = flow_to_screen(f, ta);
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
     if (!et) et = &flow_default_edge_type;
     flow_route rt = {0};
-    et->route(ss, FLOW_RIGHT, ts, FLOW_LEFT, &rt);
+    et->route(ss, sp, ts, tp, &rt);
     for (int c = 0; c < rt.count; c++)
       flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, 0);
     free(rt.cells);
@@ -105,6 +136,41 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
       flow_render_ctx ctx = { f->view.zoom, n->flags, 0 };
       nt->render(n, &surf, ctx);
+    }
+  }
+
+  /* handle markers: only on hovered/selected nodes (xyflow reveals on hover), plus
+     the active connecting source so its marker stays visible mid-drag. ◉ on the border. */
+  for (int i = 0; i < flow_node_count(f); i++) {
+    flow_node *n = &flow_nodes(f)[i];
+    if (!flow__node_handles_visible(f, n)) continue;   /* same gate as flow_hit_handle */
+    int hc = flow_node_handle_count(f, n->id);
+    for (int j = 0; j < hc; j++) {
+      const flow_handle *h = flow_node_handle_at(f, n->id, j);
+      flow_pt s = flow__handle_screen(f, n, h);         /* same projection as flow_hit_handle */
+      unsigned bold = (n->id == f->conn_node && h &&
+                       strncmp(h->id, f->conn_handle, sizeof h->id) == 0) ? FLOW_BOLD : 0;
+      flow_cellbuf_put(&cb, s.x, s.y, 0x25C9, FLOW_FG, FLOW_BG, bold);  /* ◉ */
+    }
+  }
+
+  /* in-flight connection preview: dashed rubber-band from the source handle to the
+     free cursor cell. No arrowhead — overwrite the router's last cell with a dash. */
+  if (f->conn_active) {
+    flow_node *sn = flow_get_node(f, f->conn_node);
+    const flow_handle *sh = sn ? flow__handle_named(f, f->conn_node, f->conn_handle) : NULL;
+    if (sn) {
+      flow_pos sp = sh ? sh->pos : FLOW_RIGHT;
+      flow_pt sa = flow__anchor_outward(flow_handle_anchor(f, sn, sh), sp);
+      flow_pt ss = flow_to_screen(f, sa);
+      flow_route rt = {0};
+      flow_route_orthogonal(ss, sp, f->conn_end, FLOW_LEFT, &rt);
+      /* skip the LAST cell: the router stamps an arrowhead there — a preview has none. */
+      int last = rt.count - 1;
+      for (int c = 0; c < last; c++)
+        if (((rt.cells[c].x + rt.cells[c].y) & 1) == 0)        /* dashed: every other cell */
+          flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, 0);
+      free(rt.cells);
     }
   }
 

@@ -11,4 +11,5 @@ tests/test_mouse
 tests/test_select
 tests/test_marquee
 tests/test_keys
+tests/test_connect
 demos/topo

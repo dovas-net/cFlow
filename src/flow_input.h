@@ -34,6 +34,19 @@ int flow_parse_mouse(const char *s, int n, flow_mouse_event *ev) {
   }
   return 0;          /* incomplete */
 }
+/* resolve an in-flight connection at a screen cell: complete on a target handle/node
+   (handle id when one is hit, else the node's default), else cancel. Shared by the
+   connectOnClick press path and the drag-complete release path. */
+static void flow__resolve_connection_at(flow_t *f, flow_pt scr) {
+  int tnode = -1; int hidx = flow_hit_handle(f, scr, &tnode);
+  if (tnode == -1) tnode = flow_hit_node(f, scr);
+  if (tnode != -1 && tnode != f->conn_node) {
+    const flow_handle *th = (hidx >= 0) ? flow_node_handle_at(f, tnode, hidx) : NULL;
+    flow_end_connection(f, tnode, th ? th->id : NULL);
+  } else {
+    flow_cancel_connection(f);             /* dropped on empty pane or the source */
+  }
+}
 void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
   if (ev->type == FLOW_MOUSE_WHEEL) {
     switch (ev->button) {
@@ -46,16 +59,32 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
   }
   flow_pt scr = { ev->x, ev->y };
   if (ev->type == FLOW_MOUSE_PRESS) {
-    if (ev->button == 2) {                       /* right-click: context, no drag */
+    if (ev->button == 2) {                       /* right-click: cancel any in-flight connection, else context */
+      if (f->conn_active) { flow_cancel_connection(f); return; }
       int id = flow_hit_node(f, scr);
       if (id != -1 && f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
       return;
     }
     if (ev->button == 0) {                       /* arm a press; classify on move/release */
+      /* connectOnClick resolve: a press while already connecting (armed by a prior
+         click) completes on a target handle/node, else cancels. Never arms drag. */
+      if (f->conn_active) { flow__resolve_connection_at(f, scr); return; }
       f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
-      /* HIT PRECEDENCE (trio invariant): a later package inserts higher-priority
-         hit-tests (flow_hit_handle, then flow_hit_edge) ABOVE flow_hit_node here.
-         For now: node-body (flow_hit_node) -> pane. */
+      /* HIT PRECEDENCE (trio invariant): handle -> node-body -> pane. A later edge
+         package inserts an edge-endpoint test BETWEEN handle and node-body here.
+         Handles only hit on hovered/selected/connecting nodes (flow_hit_handle). */
+      int hnode = -1; int hidx = flow_hit_handle(f, scr, &hnode);
+      if (hidx >= 0 && hnode != -1) {
+        const flow_handle *h = flow_node_handle_at(f, hnode, hidx);
+        if (h && flow_begin_connection(f, hnode, h->id) == 0) {
+          /* grabbed a source handle: do NOT arm node-drag/select. conn_* is orthogonal.
+             Clear mouse_down so the trailing release (after the connection resolves) is
+             a no-op and never falls into clear_selection/on_pane_click. */
+          f->mouse_down = 0; f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+          f->down_modsel = 0; f->marquee_active = 0;
+          return;
+        }
+      }
       f->down_node = flow_hit_node(f, scr);
       f->drag_node = -1; f->dragging_pan = 0;
       f->down_modsel = 0; f->marquee_active = 0;
@@ -72,6 +101,11 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       }
     }
   } else if (ev->type == FLOW_MOUSE_MOTION) {
+    if (f->conn_active) {                         /* drag-connect: track free end + reveal candidate */
+      if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
+      flow_update_connection(f, scr);
+      return;
+    }
     if (!f->mouse_down) return;
     if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
       f->moved = 1;                              /* threshold crossed: begin drag, marquee, or pan */
@@ -114,6 +148,14 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->last_mouse = scr;
     }
   } else if (ev->type == FLOW_MOUSE_RELEASE) {
+    if (f->conn_active) {
+      if (f->moved) {                            /* drag-connect: complete on target, else cancel */
+        flow__resolve_connection_at(f, scr);
+        f->mouse_down = 0; f->moved = 0;
+      }
+      /* else: the click that BEGAN the connection — stay armed for connectOnClick */
+      return;
+    }
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
       if (f->down_modsel) {
         /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */

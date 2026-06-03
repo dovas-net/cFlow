@@ -5,7 +5,8 @@
  *
  * Controls:
  *   left-drag a node ........ move it (edges re-route live)
- *   left-click a node ....... select it (highlighted border)
+ *   left-click a node ....... select it (highlighted border, reveals ◉ ports)
+ *   drag from a ◉ port ...... draw a connection to another node's port (Esc cancels)
  *   right-click a node ...... open its details panel
  *   left-click empty space .. clear selection / close panel
  *   left-drag empty space ... pan;  scroll/wheel ... pan;  arrows ... pan
@@ -35,7 +36,8 @@ static void dev_render(const flow_node *n, flow_surface *s, flow_render_ctx ctx)
   flow_text(s, 2, 1, d->label, FLOW_FG, FLOW_BG, bold);
   flow_text(s, 2, 2, d->kind,  FLOW_FG, FLOW_BG, 0);
 }
-static const flow_node_type DEVICE = { "device", dev_measure, dev_render, NULL, 0 };
+/* reuse the default LEFT-'in' / RIGHT-'out' ports so devices are connectable */
+static const flow_node_type DEVICE = { "device", dev_measure, dev_render, flow_default_handles, 2 };
 
 /* app state for the details panel */
 static int g_info_node = -1;

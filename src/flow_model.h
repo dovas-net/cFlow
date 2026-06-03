@@ -1,7 +1,7 @@
 /* ===== model: engine, nodes, edges, vtable types, transform, bounds, hit-test ===== */
 enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u };
 typedef enum { FLOW_HANDLE_SOURCE, FLOW_HANDLE_TARGET, FLOW_HANDLE_BOTH } flow_handle_kind;
-typedef struct { char id[16]; flow_handle_kind kind; flow_pos pos; int along; } flow_handle;
+typedef struct { char id[16]; flow_handle_kind kind; flow_pos pos; int along; } flow_handle; /* id must be a NUL-terminated C-string (matched by strcmp/strncmp, like node type[]/edge handle[]) */
 
 typedef struct { int id; char type[32]; flow_pt pos; int parent; int w, h; void *data; unsigned flags; } flow_node;
 typedef struct { int id, source, target; char source_handle[16], target_handle[16];
@@ -46,6 +46,19 @@ flow_pt   flow_to_screen(flow_t *f, flow_pt world_abs);
 flow_pt   flow_to_world(flow_t *f, flow_pt screen);
 flow_viewport flow_view_get(flow_t *f);
 
+/* handles & connections (port-handle drag/click to create edges) */
+flow_pt flow_handle_anchor(flow_t *f, const flow_node *n, const flow_handle *h); /* world-abs cell: TOP->(x+w/2,y) RIGHT->(x+w-1,y+h/2) BOTTOM->(x+w/2,y+h-1) LEFT->(x,y+h/2), +'along' offset along the side */
+int flow_node_handle_count(flow_t *f, int node);                  /* declared handles for node's type */
+const flow_handle *flow_node_handle_at(flow_t *f, int node, int idx); /* idx-th handle of node's type, or NULL */
+int flow_hit_handle(flow_t *f, flow_pt screen, int *out_node);   /* handle index + node id at screen cell, or -1; only on hovered/selected/connecting nodes */
+void flow_set_hover(flow_t *f, int node);                         /* set FLOW_HOVERED on node (clears others); -1 clears all */
+int flow_hovered_node(flow_t *f);                                 /* first FLOW_HOVERED node, or -1 */
+int flow_begin_connection(flow_t *f, int node, const char *handle); /* enter connecting from source handle; 0 ok, -1 if not a valid source */
+int flow_update_connection(flow_t *f, flow_pt screen);           /* move free end to screen cell; returns hovered candidate target node id or -1 */
+int flow_end_connection(flow_t *f, int node, const char *handle);/* complete: add edge src->node; returns new edge id or -1; clears connecting */
+void flow_cancel_connection(flow_t *f);                          /* abort in-flight connection */
+int flow_connecting(flow_t *f);                                  /* 1 while a connection/preview is in flight */
+
 /* selection — a true set, expressed via the FLOW_SELECTED node flag */
 typedef enum { FLOW_SELECT_PARTIAL, FLOW_SELECT_FULL } flow_select_mode;
 void flow_select_node(flow_t *f, int id, int additive);  /* additive=0 clears others then sets; additive=1 sets without clearing */
@@ -76,6 +89,7 @@ typedef struct {
   void (*on_node_context)(flow_t *f, int node, flow_pt screen, void *user);/* right-click on a node */
   void (*on_node_click)(flow_t *f, int node, void *user);                  /* left-click (no drag)  */
   void (*on_pane_click)(flow_t *f, flow_pt world, void *user);             /* left-click empty space */
+  void (*on_connect)(flow_t *f, int source, int target, void *user);      /* a connection was created (after flow_add_edge) */
   void *user;
 } flow_callbacks;
 void flow_set_callbacks(flow_t *f, flow_callbacks cb);
@@ -101,6 +115,7 @@ struct flow {
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
+  int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
   struct { flow_bg_variant variant; int gap; } bg;
@@ -115,7 +130,7 @@ static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
 flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
   f->view.zoom = 1; f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
-  f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL;
+  f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
@@ -163,7 +178,10 @@ void flow_move_node(flow_t *f, int id, flow_pt pos) {
 int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   if (src == dst) return -1;
   if (!flow_get_node(f, src) || !flow_get_node(f, dst)) return -1;
-  for (int i = 0; i < f->nedges; i++) if (f->edges[i].source == src && f->edges[i].target == dst) return -1;
+  const char *shs = sh ? sh : "", *ths = th ? th : "";
+  for (int i = 0; i < f->nedges; i++)                          /* dup = same (source,target,handles) */
+    if (f->edges[i].source == src && f->edges[i].target == dst &&
+        strcmp(f->edges[i].source_handle, shs) == 0 && strcmp(f->edges[i].target_handle, ths) == 0) return -1;
   f->edges = (flow_edge*)flow__grow(f->edges, &f->capedges, f->nedges + 1, sizeof(flow_edge));
   flow_edge *e = &f->edges[f->nedges++]; memset(e, 0, sizeof *e);
   e->id = f->nexteid++; e->source = src; e->target = dst;
@@ -334,4 +352,104 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   /* (3) unhandled: q, bare arrows, anything else */
   return 0;
 }
+/* ----- handles & connections ----- */
+flow_pt flow_handle_anchor(flow_t *f, const flow_node *n, const flow_handle *h) {
+  flow_rect r = flow_node_rect_abs(f, n);            /* world-abs; zoom==1 carry-over (like flow_hit_node) */
+  flow_pt p; int along = h ? h->along : 0;
+  switch (h ? h->pos : FLOW_RIGHT) {
+    case FLOW_TOP:    p.x = r.x + r.w / 2 + along; p.y = r.y;             break;
+    case FLOW_BOTTOM: p.x = r.x + r.w / 2 + along; p.y = r.y + r.h - 1;   break;
+    case FLOW_LEFT:   p.x = r.x;                   p.y = r.y + r.h / 2 + along; break;
+    default:          p.x = r.x + r.w - 1;         p.y = r.y + r.h / 2 + along; break;  /* RIGHT */
+  }
+  return p;
+}
+int flow_node_handle_count(flow_t *f, int node) {
+  flow_node *n = flow_get_node(f, node); if (!n) return 0;
+  const flow_node_type *t = flow_node_type_for(f, n->type);
+  return t ? t->handle_count : 0;
+}
+const flow_handle *flow_node_handle_at(flow_t *f, int node, int idx) {
+  flow_node *n = flow_get_node(f, node); if (!n) return NULL;
+  const flow_node_type *t = flow_node_type_for(f, n->type);
+  if (!t || !t->handles || idx < 0 || idx >= t->handle_count) return NULL;
+  return &t->handles[idx];
+}
+/* shared handle projection + visibility gate — flow_hit_handle and the render
+   marker pass MUST agree (handles render exactly where they're hittable). The zoom
+   package edits flow_handle_anchor / these two helpers in ONE place. */
+static flow_pt flow__handle_screen(flow_t *f, const flow_node *n, const flow_handle *h) {
+  return flow_to_screen(f, flow_handle_anchor(f, n, h));
+}
+static int flow__node_handles_visible(flow_t *f, const flow_node *n) {
+  return (n->flags & (FLOW_HOVERED | FLOW_SELECTED)) || n->id == f->conn_node;
+}
+int flow_hit_handle(flow_t *f, flow_pt screen, int *out_node) {
+  /* topmost first; only handles on hovered/selected/connecting nodes are hittable */
+  for (int i = f->nnodes - 1; i >= 0; i--) {
+    flow_node *n = &f->nodes[i];
+    if (!flow__node_handles_visible(f, n)) continue;
+    int hc = flow_node_handle_count(f, n->id);
+    for (int j = 0; j < hc; j++) {
+      const flow_handle *h = flow_node_handle_at(f, n->id, j);
+      flow_pt s = flow__handle_screen(f, n, h);
+      if (s.x == screen.x && s.y == screen.y) { if (out_node) *out_node = n->id; return j; }
+    }
+  }
+  if (out_node) *out_node = -1;
+  return -1;
+}
+void flow_set_hover(flow_t *f, int node) {
+  for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_HOVERED;
+  flow_node *n = flow_get_node(f, node); if (n) n->flags |= FLOW_HOVERED;
+}
+int flow_hovered_node(flow_t *f) {
+  for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_HOVERED) return f->nodes[i].id;
+  return -1;
+}
+/* find a node's handle by id; returns it or NULL */
+static const flow_handle *flow__handle_named(flow_t *f, int node, const char *id) {
+  if (!id) return NULL;
+  int hc = flow_node_handle_count(f, node);
+  for (int j = 0; j < hc; j++) { const flow_handle *h = flow_node_handle_at(f, node, j);
+    if (h && strncmp(h->id, id, sizeof h->id) == 0) return h; }
+  return NULL;
+}
+int flow_begin_connection(flow_t *f, int node, const char *handle) {
+  const flow_handle *h = flow__handle_named(f, node, handle);
+  if (!h || (h->kind != FLOW_HANDLE_SOURCE && h->kind != FLOW_HANDLE_BOTH)) return -1;  /* must be a source */
+  f->conn_active = 1; f->conn_node = node;
+  snprintf(f->conn_handle, sizeof f->conn_handle, "%s", handle ? handle : "");
+  flow_node *n = flow_get_node(f, node);
+  if (n) f->conn_end = flow_to_screen(f, flow_handle_anchor(f, n, h));   /* start the free end at the source */
+  return 0;
+}
+int flow_update_connection(flow_t *f, flow_pt screen) {
+  if (!f->conn_active) return -1;
+  f->conn_end = screen;
+  int tn = -1; (void)flow_hit_handle(f, screen, &tn);   /* prefer a handle under the cursor */
+  if (tn == -1) tn = flow_hit_node(f, screen);          /* else any node body */
+  if (tn != -1 && tn != f->conn_node) flow_set_hover(f, tn);  /* reveal candidate's handles */
+  return (tn != f->conn_node) ? tn : -1;
+}
+int flow_end_connection(flow_t *f, int node, const char *handle) {
+  if (!f->conn_active) return -1;
+  int src = f->conn_node; char sh[16]; snprintf(sh, sizeof sh, "%s", f->conn_handle);
+  /* clear connecting state up-front so a rejected add never leaves us stuck */
+  f->conn_active = 0; f->conn_node = -1; f->conn_handle[0] = 0;
+  /* target handle: explicit name, else first TARGET/BOTH handle on the node */
+  const char *th = handle;
+  if (!th && node != -1) {
+    int hc = flow_node_handle_count(f, node);
+    for (int j = 0; j < hc; j++) { const flow_handle *h = flow_node_handle_at(f, node, j);
+      if (h && (h->kind == FLOW_HANDLE_TARGET || h->kind == FLOW_HANDLE_BOTH)) { th = h->id; break; } }
+  }
+  int eid = flow_add_edge(f, src, node, sh, th);
+  if (eid != -1 && f->cb.on_connect) f->cb.on_connect(f, src, node, f->cb.user);
+  return eid;
+}
+void flow_cancel_connection(flow_t *f) {
+  f->conn_active = 0; f->conn_node = -1; f->conn_handle[0] = 0;
+}
+int flow_connecting(flow_t *f) { return f->conn_active ? 1 : 0; }
 #endif

@@ -191,6 +191,73 @@ int main(void) {
     free(mb2); flow_free(mf);
   }
 
+  /* handle markers: a HOVERED node shows ◉ on its L/R borders; a non-hovered shows none */
+  {
+    int hc = 18, hr = 6;
+    flow_cell *hb = (flow_cell*)malloc((size_t)hc * hr * sizeof(flow_cell));
+    flow_t *hf = flow_new(hc, hr); flow_register_defaults(hf);
+    int a = flow_add_node(hf, "default", (flow_pt){0, 1}, (void*)"A");   /* w=5,h=3; L@(0,2) R@(4,2) */
+    flow_add_node(hf, "default", (flow_pt){10, 1}, (void*)"B");          /* not hovered: no markers */
+    flow_set_hover(hf, a);
+    flow_render(hf, hb, hc, hr);
+    int markers = 0;
+    for (int i = 0; i < hc * hr; i++) if (hb[i].ch == 0x25C9) markers++;
+    ASSERT_INT(markers, 2, "hovered node shows exactly 2 ◉ handle markers");
+    ASSERT_INT(hb[2*hc + 0].ch, 0x25C9, "LEFT handle marker on hovered node border");
+    ASSERT_INT(hb[2*hc + 4].ch, 0x25C9, "RIGHT handle marker on hovered node border");
+    /* B (not hovered, cols 10..14) shows no marker on its borders */
+    ASSERT(hb[2*hc + 10].ch != 0x25C9 && hb[2*hc + 14].ch != 0x25C9, "non-hovered node has no markers");
+    char *hs = cells_to_string(hb, hc, hr);
+    SNAPSHOT("render_handles_hover", hs); free(hs);
+    free(hb); flow_free(hf);
+  }
+
+  /* in-flight connection preview: dashed rubber-band from a source handle to a free
+     cursor cell. No arrowhead; a dashed pattern is present. */
+  {
+    int pc = 24, pr = 6;
+    flow_cell *pb = (flow_cell*)malloc((size_t)pc * pr * sizeof(flow_cell));
+    flow_t *pf = flow_new(pc, pr); flow_register_defaults(pf);
+    int a = flow_add_node(pf, "default", (flow_pt){0, 1}, (void*)"A");   /* RIGHT@(4,2) */
+    flow_set_hover(pf, a);
+    /* press A's RIGHT handle (screen (4,2) => SGR (5,3)), drag to a free cell (18,2)=>SGR(19,3) */
+    flow_feed(pf, "\x1b[<0;5;3M", 9);
+    flow_feed(pf, "\x1b[<32;19;3M", 11);
+    flow_render(pf, pb, pc, pr);
+    int arrow = 0, dashes = 0;
+    for (int i = 0; i < pc * pr; i++) { uint32_t c = pb[i].ch;
+      if (c==0x25B6||c==0x25C0||c==0x25BC||c==0x25B2) arrow = 1;
+      if (c==0x2500 || c==0x2502 || c==0x250C || c==0x2510 || c==0x2514 || c==0x2518) dashes++; }
+    ASSERT(!arrow, "preview shows NO arrowhead");
+    ASSERT(dashes >= 2, "preview shows a dashed line (>=2 path cells)");
+    char *ps = cells_to_string(pb, pc, pr);
+    SNAPSHOT("render_connect_preview", ps); free(ps);
+    flow_feed(pf, "\x1b[<0;19;3m", 9);   /* release on empty -> cancel */
+    free(pb); flow_free(pf);
+  }
+
+  /* committed edge anchored on declared handles: A->B edge meets RIGHT-of-A and
+     LEFT-of-B (via flow_handle_anchor), not the old fixed points. Neither node is
+     hovered/selected, so no ◉ markers — the snapshot is pure edge anchoring. */
+  {
+    int ec = 24, er = 6;
+    flow_cell *eb = (flow_cell*)malloc((size_t)ec * er * sizeof(flow_cell));
+    flow_t *ef = flow_new(ec, er); flow_register_defaults(ef);
+    int a = flow_add_node(ef, "default", (flow_pt){0, 1}, (void*)"A");   /* RIGHT border col 4, row 2 */
+    int b = flow_add_node(ef, "default", (flow_pt){14, 1}, (void*)"B");  /* LEFT border col 14, row 2 */
+    flow_add_edge(ef, a, b, "out", "in");
+    flow_render(ef, eb, ec, er);
+    int has_arrow = 0;
+    for (int i = 0; i < ec * er; i++) { uint32_t c = eb[i].ch;
+      if (c==0x25B6||c==0x25C0||c==0x25BC||c==0x25B2) has_arrow = 1; }
+    ASSERT(has_arrow, "handle-anchored edge still renders an arrowhead");
+    /* the edge leaves A's RIGHT border (row 2) at col 5 (one cell outside) */
+    ASSERT_INT(eb[2*ec + 5].ch, 0x2500, "edge departs RIGHT-of-A on the handle row");
+    char *es = cells_to_string(eb, ec, er);
+    SNAPSHOT("render_edge_handle_anchors", es); free(es);
+    free(eb); flow_free(ef);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

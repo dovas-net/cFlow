@@ -30,6 +30,9 @@ void flow_feed(flow_t *f, const char *b, int n) {
         default: break;
       }
     }
+    /* lone ESC (not the start of a CSI) cancels an in-flight connection. Real
+       mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above. */
+    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); i++; continue; }
     i++;
   }
 }
