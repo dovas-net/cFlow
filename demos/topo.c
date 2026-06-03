@@ -32,6 +32,10 @@ static void dev_measure(const flow_node *n, int *w, int *h) {
 static void dev_render(const flow_node *n, flow_surface *s, flow_render_ctx ctx) {
   const device *d = (const device*)n->data;
   unsigned bold = (ctx.flags & FLOW_SELECTED) ? FLOW_BOLD : 0;
+  if (ctx.lod) {  /* zoomed out: one collapsed marker at the top-left cell (matches footprint) */
+    flow_put(s, 0, 0, 0x25A0, FLOW_FG, FLOW_BG, bold);   /* ■ */
+    return;
+  }
   flow_box(s, 0, 0, flow_surface_w(s), flow_surface_h(s), FLOW_FG, FLOW_BG, bold);
   flow_text(s, 2, 1, d->label, FLOW_FG, FLOW_BG, bold);
   flow_text(s, 2, 2, d->kind,  FLOW_FG, FLOW_BG, 0);

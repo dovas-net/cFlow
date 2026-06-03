@@ -43,9 +43,12 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
     for (int xx = 1; xx < bw - 1; xx++)
       flow_put(&s, xx, yy, ' ', FLOW_FG, FLOW_BG, 0);
   int iw = bw - 2, ih = bh - 2;
-  /* world window encompasses all nodes and the current screen rect */
+  /* world window encompasses all nodes and the current screen rect. Project BOTH
+     screen corners so the world viewport size is zoom-correct (at zoom==1 this
+     yields w/h == cb->w/cb->h, so the existing minimap asserts still hold). */
   flow_pt w0 = flow_to_world(f, (flow_pt){0, 0});
-  flow_rect vp = { w0.x, w0.y, cb->w, cb->h };          /* zoom==1 */
+  flow_pt w1 = flow_to_world(f, (flow_pt){cb->w, cb->h});
+  flow_rect vp = { w0.x, w0.y, w1.x - w0.x, w1.y - w0.y };
   flow_rect W = f->nnodes ? flow_rect_union(flow_bounds(f), vp) : vp;
   if (W.w < 1) W.w = 1; if (W.h < 1) W.h = 1;
   /* viewport rectangle first, node dots on top */
@@ -92,9 +95,11 @@ static const flow_handle *flow__edge_handle(flow_t *f, flow_node *n, const char 
   return flow_node_handle_at(f, n->id, 0);                   /* fall back to first */
 }
 /* Screen endpoints + facings for an edge, matching EXACTLY what flow_render draws:
-   declared-handle anchor -> outward nudge -> flow_to_screen. The render edge loop,
-   flow_hit_edge and flow_edge_endpoint_screen all go through this so hit-test and
-   render can never drift (the zoom package makes this helper zoom-aware in ONE place).
+   declared-handle -> flow__handle_screen (anchors to the constant-size footprint) ->
+   one-cell SCREEN-space outward nudge. The render edge loop, flow_hit_edge and
+   flow_edge_endpoint_screen all go through this so hit-test and render can never
+   drift, and endpoints stay attached to node bodies at any zoom (the nudge is in
+   screen space so it's "one screen cell outside the constant body").
    Returns 0 if either node is missing. */
 static int flow__edge_screen_ends(flow_t *f, flow_edge *e, flow_pt *ss, flow_pos *sp, flow_pt *ts, flow_pos *tp) {
   flow_node *sn = flow_get_node(f, e->source), *tn = flow_get_node(f, e->target);
@@ -102,10 +107,8 @@ static int flow__edge_screen_ends(flow_t *f, flow_edge *e, flow_pt *ss, flow_pos
   const flow_handle *sh = flow__edge_handle(f, sn, e->source_handle, 1);
   const flow_handle *th = flow__edge_handle(f, tn, e->target_handle, 0);
   flow_pos lsp = sh ? sh->pos : FLOW_RIGHT, ltp = th ? th->pos : FLOW_LEFT;
-  flow_pt sa = flow__anchor_outward(flow_handle_anchor(f, sn, sh), lsp);
-  flow_pt ta = flow__anchor_outward(flow_handle_anchor(f, tn, th), ltp);
-  if (ss) *ss = flow_to_screen(f, sa);
-  if (ts) *ts = flow_to_screen(f, ta);
+  if (ss) *ss = flow__anchor_outward(flow__handle_screen(f, sn, sh), lsp);
+  if (ts) *ts = flow__anchor_outward(flow__handle_screen(f, tn, th), ltp);
   if (sp) *sp = lsp;
   if (tp) *tp = ltp;
   return 1;
@@ -177,7 +180,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       const flow_node_type *nt = flow_node_type_for(f, n->type);
       if (!nt || !nt->render) continue;
       flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
-      flow_render_ctx ctx = { f->view.zoom, n->flags, 0 };
+      flow_render_ctx ctx = { f->view.zoom, n->flags, flow__lod_for(f, f->view.zoom) };
       nt->render(n, &surf, ctx);
     }
   }

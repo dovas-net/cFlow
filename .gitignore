@@ -13,4 +13,5 @@ tests/test_marquee
 tests/test_keys
 tests/test_connect
 tests/test_edge
+tests/test_zoom
 demos/topo

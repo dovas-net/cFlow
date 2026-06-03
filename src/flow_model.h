@@ -1,5 +1,11 @@
 /* ===== model: engine, nodes, edges, vtable types, transform, bounds, hit-test ===== */
 enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u };
+
+/* zoom constants (used by flow_model, flow_view, flow_render, flow_types — all at/after flow_model) */
+#define FLOW_ZOOM_MIN      0.25f   /* default lower clamp */
+#define FLOW_ZOOM_MAX      4.0f    /* default upper clamp */
+#define FLOW_ZOOM_STEP     1.2f    /* multiply/divide per zoom_in/out detent */
+#define FLOW_LOD_THRESHOLD 0.6f    /* below this, node renderers collapse to a marker */
 typedef enum { FLOW_HANDLE_SOURCE, FLOW_HANDLE_TARGET, FLOW_HANDLE_BOTH } flow_handle_kind;
 typedef struct { char id[16]; flow_handle_kind kind; flow_pos pos; int along; } flow_handle; /* id must be a NUL-terminated C-string (matched by strcmp/strncmp, like node type[]/edge handle[]) */
 
@@ -89,7 +95,7 @@ void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user); /* r
 int  flow_dispatch_key(flow_t *f, const char *seq, int n); /* run a binding/built-in for one key seq; returns bytes consumed (>0) or 0 if unhandled */
 void flow_delete_selection(flow_t *f);     /* built-in: remove selected node(s) then selected edge */
 int  flow_add_node_center(flow_t *f, const char *type, void *data); /* add at world point under viewport center; returns id */
-void flow_fit_view(flow_t *f, int margin); /* zoom==1: pan so flow_bounds is centred; no-op when empty */
+void flow_fit_view(flow_t *f, int margin); /* getViewportForBounds: pick zoom+pan so flow_bounds fits with `margin` cells of padding (zoom clamped to [zmin,zmax]); no-op when empty */
 void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom help/status line */
 
 /* callbacks — the library/app seam (panel content stays app-side, like xyflow <Panel>) */
@@ -117,7 +123,7 @@ struct flow {
   flow_edge *edges; int nedges, capedges, nexteid;
   const flow_node_type **ntypes; int nntypes;
   const flow_edge_type **etypes; int netypes;
-  flow_viewport view; int cols, rows; flow_cell *front; int running;
+  flow_viewport view; float zmin, zmax; int cols, rows; flow_cell *front; int running;
   int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
@@ -139,7 +145,8 @@ static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
 }
 flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
-  f->view.zoom = 1; f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
+  f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
+  f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
   f->reconnect_edge = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
@@ -219,11 +226,24 @@ flow_rect flow_bounds(flow_t *f) {
   for (int i = 1; i < f->nnodes; i++) b = flow_rect_union(b, flow_node_rect_abs(f, &f->nodes[i]));
   return b;
 }
+/* Shared level-of-detail + footprint helpers. BOTH flow_hit_node and the render node
+   loop go through these so the hittable area and the drawn area can never drift.
+   flow__lod_for: 1 (collapsed) when zoom is below FLOW_LOD_THRESHOLD, else 0 (full).
+   flow__node_footprint: the screen-space rect a node occupies — projected top-left,
+   full w/h at lod 0, a single collapsed-marker cell (1x1) at lod 1. (Glyph size is
+   constant: only POSITION scales with zoom; low zoom is expressed by LOD, not size.) */
+static int flow__lod_for(flow_t *f, float zoom) { (void)f; return zoom < FLOW_LOD_THRESHOLD ? 1 : 0; }
+static flow_rect flow__node_footprint(flow_t *f, const flow_node *n, int lod) {
+  flow_rect wr = flow_node_rect_abs(f, n);
+  flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
+  if (lod) { flow_rect r = { s.x, s.y, 1, 1 }; return r; }  /* collapsed marker: 1x1 at top-left */
+  flow_rect r = { s.x, s.y, wr.w, wr.h }; return r;          /* full box (constant glyph size) */
+}
 int flow_hit_node(flow_t *f, flow_pt screen) {
+  int lod = flow__lod_for(f, f->view.zoom);
   for (int i = f->nnodes - 1; i >= 0; i--) {        /* topmost first */
-    flow_node *n = &f->nodes[i]; flow_rect wr = flow_node_rect_abs(f, n);
-    flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
-    flow_rect sr = { s.x, s.y, wr.w, wr.h };          /* zoom==1 in increment 1: size unscaled */
+    flow_node *n = &f->nodes[i];
+    flow_rect sr = flow__node_footprint(f, n, lod);  /* exact footprint the renderer draws */
     if (flow_rect_contains(sr, screen)) return n->id;
   }
   return -1;
@@ -258,7 +278,7 @@ int flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int a
   int c = 0;
   for (int i = 0; i < f->nnodes; i++) {
     flow_node *n = &f->nodes[i];
-    flow_rect nr = flow_node_rect_abs(f, n);            /* world rect; zoom==1 carry-over */
+    flow_rect nr = flow_node_rect_abs(f, n);            /* world rect; compared against the world-space marquee (caller unprojects) */
     int hit;
     if (mode == FLOW_SELECT_FULL) {                     /* node fully inside marquee */
       hit = nr.x >= world.x && nr.y >= world.y &&
@@ -363,16 +383,21 @@ int flow_add_node_center(flow_t *f, const char *type, void *data) {
   return id;
 }
 void flow_fit_view(flow_t *f, int margin) {
-  /* zoom==1 ONLY (honest carry-over, like flow_hit_node): pure integer pan that
-     centres flow_bounds. A future zoom package SUPERSEDES this exact function to
-     also choose a zoom level — keep it one editable definition. `margin` is the
-     unused-but-reserved usable-area inset; centring already gives equal margins. */
-  (void)margin;
+  /* getViewportForBounds: pick a zoom that makes flow_bounds fit inside the usable
+     area (cols/rows minus `margin` cells of padding on each side), clamped to the
+     [zmin,zmax] range, then pan so the bounds centre lands on the screen centre.
+     One editable definition — the zoom package made this zoom-aware in place. */
   if (f->nnodes == 0) return;                                 /* empty: no-op */
   flow_rect b = flow_bounds(f);
-  f->view.zoom = 1;
-  f->view.ox = (float)(f->cols / 2 - (b.x + b.w / 2));
-  f->view.oy = (float)(f->rows / 2 - (b.y + b.h / 2));
+  if (b.w <= 0 || b.h <= 0) return;
+  float zx = (float)(f->cols - 2 * margin) / (float)b.w;
+  float zy = (float)(f->rows - 2 * margin) / (float)b.h;
+  float z = zx < zy ? zx : zy;
+  if (z < f->zmin) z = f->zmin;
+  if (z > f->zmax) z = f->zmax;
+  f->view.zoom = z;
+  f->view.ox = f->cols / 2.0f - (b.x + b.w / 2.0f) * z;
+  f->view.oy = f->rows / 2.0f - (b.y + b.h / 2.0f) * z;
 }
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user) {
@@ -406,7 +431,7 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
 }
 /* ----- handles & connections ----- */
 flow_pt flow_handle_anchor(flow_t *f, const flow_node *n, const flow_handle *h) {
-  flow_rect r = flow_node_rect_abs(f, n);            /* world-abs; zoom==1 carry-over (like flow_hit_node) */
+  flow_rect r = flow_node_rect_abs(f, n);            /* world-abs cell anchor; consumers project via flow_to_screen */
   flow_pt p; int along = h ? h->along : 0;
   switch (h ? h->pos : FLOW_RIGHT) {
     case FLOW_TOP:    p.x = r.x + r.w / 2 + along; p.y = r.y;             break;
@@ -428,10 +453,20 @@ const flow_handle *flow_node_handle_at(flow_t *f, int node, int idx) {
   return &t->handles[idx];
 }
 /* shared handle projection + visibility gate — flow_hit_handle and the render
-   marker pass MUST agree (handles render exactly where they're hittable). The zoom
-   package edits flow_handle_anchor / these two helpers in ONE place. */
+   marker pass MUST agree (handles render exactly where they're hittable).
+   Node BODIES use constant glyph size (don't scale with zoom), so the handle's
+   in-body offset must be applied UNSCALED against the rendered footprint — else at
+   zoom>1 the anchor (projected from world) floats offset*(zoom-1) cells off the body.
+   At zoom==1 this is byte-identical to project(world_anchor); at LOD-collapse the
+   footprint is the 1x1 marker so the offset clamps to (0,0) -> the marker cell. */
 static flow_pt flow__handle_screen(flow_t *f, const flow_node *n, const flow_handle *h) {
-  return flow_to_screen(f, flow_handle_anchor(f, n, h));
+  flow_rect wr = flow_node_rect_abs(f, n);                 /* world rect (top-left + w,h) */
+  flow_pt   wa = flow_handle_anchor(f, n, h);              /* world anchor (handles NULL h + 'along') */
+  int ox = wa.x - wr.x, oy = wa.y - wr.y;                  /* in-body offset in CONSTANT cells */
+  flow_rect fp = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom)); /* screen rect: full OR collapsed */
+  if (ox > fp.w - 1) ox = fp.w - 1; if (ox < 0) ox = 0;    /* clamp into footprint */
+  if (oy > fp.h - 1) oy = fp.h - 1; if (oy < 0) oy = 0;
+  flow_pt s = { fp.x + ox, fp.y + oy }; return s;
 }
 static int flow__node_handles_visible(flow_t *f, const flow_node *n) {
   return (n->flags & (FLOW_HOVERED | FLOW_SELECTED)) || n->id == f->conn_node;

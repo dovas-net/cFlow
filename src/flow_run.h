@@ -30,6 +30,10 @@ void flow_feed(flow_t *f, const char *b, int n) {
         default: break;
       }
     }
+    /* +/- zoom (keyboard has no cursor, so center on the screen centre). Placed AFTER
+       flow_dispatch_key so a user flow_bind_key('+') override still wins via the registry. */
+    if (b[i] == '+' || b[i] == '=') { flow_zoom_in (f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
+    if (b[i] == '-' || b[i] == '_') { flow_zoom_out(f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
     /* lone ESC (not the start of a CSI) cancels an in-flight connection. Real
        mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above. */
     if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); i++; continue; }

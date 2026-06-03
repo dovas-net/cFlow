@@ -49,6 +49,12 @@ static void flow__resolve_connection_at(flow_t *f, flow_pt scr) {
 }
 void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
   if (ev->type == FLOW_MOUSE_WHEEL) {
+    if (ev->mods & FLOW_MOD_CTRL) {           /* Ctrl+wheel: pointer-centered zoom (button 0=in,1=out) */
+      flow_pt cur = { ev->x, ev->y };
+      if (ev->button == 0)      flow_zoom_in(f, cur);
+      else if (ev->button == 1) flow_zoom_out(f, cur);
+      return;
+    }
     switch (ev->button) {
       case 0: flow_pan(f, 0,  1); break;   /* wheel up    */
       case 1: flow_pan(f, 0, -1); break;   /* wheel down  */

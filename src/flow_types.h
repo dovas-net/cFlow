@@ -12,6 +12,10 @@ static void flow__default_measure(const flow_node *n, int *w, int *h) {
 static void flow__default_render(const flow_node *n, flow_surface *s, flow_render_ctx ctx) {
   const char *label = n->data ? (const char*)n->data : "";
   unsigned bold = (ctx.flags & FLOW_SELECTED) ? FLOW_BOLD : 0;
+  if (ctx.lod) {  /* collapsed: ONE marker at the top-left cell (matches flow__node_footprint) */
+    flow_put(s, 0, 0, 0x25A0, FLOW_FG, FLOW_BG, bold);   /* ■ */
+    return;
+  }
   flow_box(s, 0, 0, flow_surface_w(s), flow_surface_h(s), FLOW_FG, FLOW_BG, bold);
   flow_text(s, 2, 1, label, FLOW_FG, FLOW_BG, bold);
 }

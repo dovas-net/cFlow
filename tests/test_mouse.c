@@ -47,6 +47,22 @@ int main(void) {
   flow_feed(f, "\x1b[<32;60;11M", 12);
   ASSERT_INT(flow_to_screen(f, (flow_pt){0,0}).x, held.x, "no pan after release");
 
+  /* ---- wheel: plain wheel pans (zoom unchanged); Ctrl+wheel zooms (no pan) ---- */
+  {
+    float z0 = flow_zoom(f);
+    flow_viewport pv0 = flow_view_get(f);
+    flow_feed(f, "\x1b[<64;41;13M", 12);            /* plain wheel-up: button 64 */
+    ASSERT_INT(flow_zoom(f) == z0, 1, "plain wheel-up does not change zoom");
+    ASSERT(flow_view_get(f).oy != pv0.oy, "plain wheel-up still pans (offset changes)");
+    /* Ctrl+wheel-up (64|16|0=80) zooms in; Ctrl+wheel-down (64|16|1=81) zooms out */
+    float z1 = flow_zoom(f);
+    flow_feed(f, "\x1b[<80;41;13M", 12);
+    ASSERT(flow_zoom(f) > z1, "Ctrl+wheel-up zooms in");
+    float z2 = flow_zoom(f);
+    flow_feed(f, "\x1b[<81;41;13M", 12);
+    ASSERT(flow_zoom(f) < z2, "Ctrl+wheel-down zooms out");
+  }
+
   flow_free(f);
   return flowtest_report("test_mouse");
 }
