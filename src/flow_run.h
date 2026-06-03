@@ -19,6 +19,8 @@ void flow_feed(flow_t *f, const char *b, int n) {
       flow_mouse_event ev; int used = flow_parse_mouse(b + i, n - i, &ev);
       if (used > 0) { flow_handle_mouse(f, &ev); i += used; continue; }
     }
+    int dk = flow_dispatch_key(f, b + i, n - i);   /* registry/built-in keys (NOT bare arrows, NOT 'q') */
+    if (dk > 0) { i += dk; continue; }
     if (b[i] == '\x1b' && i + 2 < n && b[i+1] == '[') {
       switch (b[i+2]) {                          /* arrow-key pan */
         case 'A': flow_pan(f, 0,  1); i += 3; continue;   /* up    */

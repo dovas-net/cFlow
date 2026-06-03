@@ -104,5 +104,13 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
   if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
+
+  /* built-in status/help bar: drawn LAST (after the app overlay) on the bottom
+     row only, so it never fights the app's overlay on other rows. */
+  if (f->statusbar && rows > 0) {
+    flow_surface s = { &cb, 0, rows - 1, cols, 1 };
+    for (int x = 0; x < cols; x++) flow_put(&s, x, 0, ' ', FLOW_FG, FLOW_BG, FLOW_REVERSE);
+    flow_text(&s, 0, 0, " n:add  x:del  f:fit  ?:help  q:quit ", FLOW_FG, FLOW_BG, FLOW_REVERSE);
+  }
 }
 #endif

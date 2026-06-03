@@ -1,0 +1,6 @@
+┌────┐
+│ hi │
+└────┘
+
+
+ n:add  x:del  f:fit  ?:help

@@ -54,5 +54,42 @@ int main(void) {
   ASSERT(flow_edge_type_for(g, "default") != NULL, "default edge type registered");
   flow_free(g);
 
+  /* flow_remove_node cascade: incident edges + child nodes, survivors intact */
+  {
+    flow_t *h = flow_new(80, 24); flow_register_defaults(h);
+    int n1 = flow_add_node(h, "default", (flow_pt){0, 0}, (void*)"a");   /* victim */
+    int n2 = flow_add_node(h, "default", (flow_pt){20, 0}, (void*)"b");  /* peer */
+    int n3 = flow_add_node(h, "default", (flow_pt){40, 0}, (void*)"c");  /* peer */
+    int child = flow_add_node(h, "default", (flow_pt){2, 2}, (void*)"k");/* child of n1 */
+    flow_get_node(h, child)->parent = n1;
+    int ea = flow_add_edge(h, n1, n2, "", "");   /* incident to victim */
+    int eb = flow_add_edge(h, n3, n1, "", "");   /* incident to victim */
+    int ec = flow_add_edge(h, n2, n3, "", "");   /* unrelated, survives */
+    flow_get_edge(h, ea)->label = strdup("ea");  /* labels must be freed on removal */
+    flow_get_edge(h, eb)->label = strdup("eb");
+
+    flow_remove_node(h, n1);
+    ASSERT(flow_get_node(h, n1) == NULL, "cascade: victim removed");
+    ASSERT(flow_get_node(h, child) == NULL, "cascade: child node removed");
+    ASSERT(flow_get_edge(h, ea) == NULL, "cascade: incident edge ea removed");
+    ASSERT(flow_get_edge(h, eb) == NULL, "cascade: incident edge eb removed");
+    ASSERT(flow_get_edge(h, ec) != NULL, "cascade: unrelated edge ec survives");
+    ASSERT(flow_get_node(h, n2) != NULL, "cascade: peer n2 survives");
+    ASSERT(flow_get_node(h, n3) != NULL, "cascade: peer n3 survives");
+    ASSERT_INT(flow_node_count(h), 2, "cascade: two nodes remain");
+    ASSERT_INT(flow_edge_count(h), 1, "cascade: one edge remains");
+    /* surviving ids unchanged */
+    ASSERT_INT(flow_get_node(h, n2)->id, n2, "cascade: n2 id unchanged");
+    ASSERT_INT(flow_get_edge(h, ec)->id, ec, "cascade: ec id unchanged");
+
+    /* flow_remove_edge: free + no-op on absent id */
+    flow_get_edge(h, ec)->label = strdup("ec");
+    flow_remove_edge(h, ec);
+    ASSERT_INT(flow_edge_count(h), 0, "remove_edge dropped ec");
+    flow_remove_edge(h, 9999);  /* no-op, no crash */
+    ASSERT_INT(flow_edge_count(h), 0, "remove_edge absent id is no-op");
+    flow_free(h);
+  }
+
   return flowtest_report("test_model");
 }

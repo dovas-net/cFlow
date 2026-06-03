@@ -9,4 +9,5 @@ tests/test_render
 tests/test_input
 tests/test_mouse
 tests/test_select
+tests/test_keys
 demos/topo
