@@ -48,6 +48,21 @@ flow_node *flow_nodes(flow_t *f);
 flow_edge *flow_edges(flow_t *f);
 flow_pt   flow_node_abs(flow_t *f, const flow_node *n);
 flow_rect flow_node_rect_abs(flow_t *f, const flow_node *n);
+flow_pt   flow_node_pos(const flow_node *n);  /* relative (stored) position; companion to flow_node_abs */
+
+/* subflows / groups — parent-relative coordinates + group container management.
+   flow_set_parent: reparent `child` under `parent` (-1 detaches to top level), converting
+     child->pos so its ABSOLUTE world position is unchanged. Rejects cycles (parent==child
+     or parent is a descendant of child) and missing ids. Array order/ids unchanged.
+   flow_group: create a `group` container enclosing the given node ids (world bbox+padding),
+     reparent each under it (abs preserved); returns the new group id (-1 if none valid).
+   flow_ungroup: reparent every direct child OUT to the group's own parent (abs preserved),
+     THEN remove the now-childless container — children SURVIVE (unlike flow_remove_node).
+   flow_is_ancestor: 1 if `maybe_ancestor` is `node` or any ancestor of `node`. */
+void flow_set_parent(flow_t *f, int child, int parent);
+int  flow_group(flow_t *f, const int *ids, int n);
+void flow_ungroup(flow_t *f, int id);
+int  flow_is_ancestor(flow_t *f, int maybe_ancestor, int node);
 flow_rect flow_bounds(flow_t *f);
 int       flow_hit_node(flow_t *f, flow_pt screen);
 void      flow_pan(flow_t *f, int dx, int dy);
@@ -209,8 +224,77 @@ int flow_add_node(flow_t *f, const char *type, flow_pt pos, void *data) {
   return n->id;
 }
 void flow_move_node(flow_t *f, int id, flow_pt pos) {
+  /* ABSOLUTE-in contract: `pos` is a world-absolute target. Store it parent-relative so
+     a child stays under the cursor. For top-level nodes (parent==-1) parent_abs=={0,0},
+     so n->pos == pos — byte-identical to the pre-groups behaviour for every existing caller. */
   flow_node *n = flow_get_node(f, id);
-  if (n) n->pos = pos;   /* increment 1/2a: top-level nodes only, so pos == absolute */
+  if (!n) return;
+  flow_pt pa = { 0, 0 };
+  if (n->parent != -1) { flow_node *p = flow_get_node(f, n->parent); if (p) pa = flow_node_abs(f, p); }
+  n->pos.x = pos.x - pa.x; n->pos.y = pos.y - pa.y;
+}
+flow_pt flow_node_pos(const flow_node *n) { return n->pos; }
+/* depth = length of the parent chain (0 for top-level). O(depth) walk, cycle-guarded. */
+static int flow__node_depth(flow_t *f, const flow_node *n) {
+  int d = 0, parent = n->parent, guard = 0;
+  while (parent != -1 && guard++ < 1024) { flow_node *pn = flow_get_node(f, parent); if (!pn) break; d++; parent = pn->parent; }
+  return d;
+}
+int flow_is_ancestor(flow_t *f, int maybe_ancestor, int node) {
+  int cur = node, guard = 0;                       /* maybe_ancestor==node counts (chain includes self) */
+  while (cur != -1 && guard++ < 1024) {
+    if (cur == maybe_ancestor) return 1;
+    flow_node *n = flow_get_node(f, cur); if (!n) break; cur = n->parent;
+  }
+  return 0;
+}
+void flow_set_parent(flow_t *f, int child, int parent) {
+  flow_node *c = flow_get_node(f, child);
+  if (!c) return;
+  if (parent == child) return;                     /* trivial self-parent */
+  if (parent != -1) {
+    if (!flow_get_node(f, parent)) return;         /* missing parent id */
+    if (flow_is_ancestor(f, child, parent)) return;/* cycle: parent is a descendant of child */
+  }
+  /* read both abs positions while the OLD parent chain is still intact */
+  flow_pt cabs = flow_node_abs(f, c);
+  flow_pt pabs = { 0, 0 };
+  if (parent != -1) { flow_node *p = flow_get_node(f, parent); pabs = flow_node_abs(f, p); }
+  c->parent = parent;
+  c->pos.x = cabs.x - pabs.x; c->pos.y = cabs.y - pabs.y;   /* abs preserved across the move */
+}
+int flow_group(flow_t *f, const int *ids, int n) {
+  if (!ids || n <= 0) return -1;
+  /* world bbox of the valid member ids (pointers valid only before flow_add_node) */
+  flow_rect bb = {0,0,0,0}; int have = 0;
+  for (int i = 0; i < n; i++) {
+    flow_node *m = flow_get_node(f, ids[i]); if (!m) continue;
+    flow_rect mr = flow_node_rect_abs(f, m);
+    bb = have ? flow_rect_union(bb, mr) : mr; have = 1;
+  }
+  if (!have) return -1;
+  const int pad = 1;
+  flow_pt gpos = { bb.x - pad, bb.y - pad };
+  int gw = bb.w + 2 * pad, gh = bb.h + 2 * pad;
+  int gid = flow_add_node(f, "group", gpos, NULL);   /* measure is a no-op write-back; w/h set next */
+  flow_node *g = flow_get_node(f, gid);              /* re-fetch: array may have realloc'd */
+  if (g) { g->w = gw; g->h = gh; }
+  for (int i = 0; i < n; i++) {                       /* reparent members (abs preserved) */
+    if (flow_get_node(f, ids[i])) flow_set_parent(f, ids[i], gid);
+  }
+  return gid;
+}
+void flow_ungroup(flow_t *f, int id) {
+  flow_node *g = flow_get_node(f, id);
+  if (!g || strcmp(g->type, "group") != 0) return;   /* no-op if missing or not a group */
+  int gparent = g->parent;
+  for (;;) {                                          /* reparent each direct child OUT (abs preserved) */
+    int childid = -1;
+    for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].parent == id) { childid = f->nodes[i].id; break; }
+    if (childid == -1) break;
+    flow_set_parent(f, childid, gparent);             /* re-find by id each step (array stable here, but safe) */
+  }
+  flow_remove_node(f, id);                             /* now childless: removes only the container */
 }
 int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   if (src == dst) return -1;
@@ -258,14 +342,54 @@ static flow_rect flow__node_footprint(flow_t *f, const flow_node *n, int lod) {
   if (lod) { flow_rect r = { s.x, s.y, 1, 1 }; return r; }  /* collapsed marker: 1x1 at top-left */
   flow_rect r = { s.x, s.y, wr.w, wr.h }; return r;          /* full box (constant glyph size) */
 }
+/* Depth-aware visit order. Array order is NO LONGER a valid z/hit order once groups
+   exist (a group appended at the tail must draw UNDER its earlier children and never
+   steal their hits). We build a TRANSIENT index list each pass (the nodes[] array,
+   ids, serialize and flow_get_node stay untouched) sorted by a stable key:
+     RENDER (want_render=1): depth ASC, then unselected-before-selected, then array idx ASC
+       — parent-before-child DOMINATES; selected-last applies only AMONG SIBLINGS.
+     HIT    (want_render=0): depth DESC, then array idx DESC (no selection term)
+       — topmost descendant first; for all-top-level scenes this reduces to reverse-array,
+         keeping every existing hit-order golden byte-identical.
+   idx is a unique final tiebreaker so qsort is deterministic. Caller frees the list. */
+typedef struct { int idx, depth, sel; } flow__order_ent;
+static int flow__order_cmp_render(const void *pa, const void *pb) {
+  const flow__order_ent *a = (const flow__order_ent*)pa, *b = (const flow__order_ent*)pb;
+  if (a->depth != b->depth) return a->depth - b->depth;   /* depth asc */
+  if (a->sel  != b->sel)   return a->sel  - b->sel;       /* unselected(0) before selected(1) */
+  return a->idx - b->idx;                                 /* array idx asc */
+}
+static int flow__order_cmp_hit(const void *pa, const void *pb) {
+  const flow__order_ent *a = (const flow__order_ent*)pa, *b = (const flow__order_ent*)pb;
+  if (a->depth != b->depth) return b->depth - a->depth;   /* depth desc */
+  return b->idx - a->idx;                                 /* array idx desc */
+}
+/* Allocate + fill an ordered index list (length f->nnodes). Returns NULL when empty. */
+static int *flow__node_order(flow_t *f, int want_render) {
+  if (f->nnodes <= 0) return NULL;
+  flow__order_ent *ents = (flow__order_ent*)malloc((size_t)f->nnodes * sizeof *ents);
+  if (!ents) return NULL;
+  for (int i = 0; i < f->nnodes; i++) {
+    ents[i].idx = i; ents[i].depth = flow__node_depth(f, &f->nodes[i]);
+    ents[i].sel = (f->nodes[i].flags & FLOW_SELECTED) ? 1 : 0;
+  }
+  qsort(ents, (size_t)f->nnodes, sizeof *ents, want_render ? flow__order_cmp_render : flow__order_cmp_hit);
+  int *order = (int*)malloc((size_t)f->nnodes * sizeof(int));
+  if (order) for (int i = 0; i < f->nnodes; i++) order[i] = ents[i].idx;
+  free(ents);
+  return order;
+}
 int flow_hit_node(flow_t *f, flow_pt screen) {
   int lod = flow__lod_for(f, f->view.zoom);
-  for (int i = f->nnodes - 1; i >= 0; i--) {        /* topmost first */
-    flow_node *n = &f->nodes[i];
-    flow_rect sr = flow__node_footprint(f, n, lod);  /* exact footprint the renderer draws */
-    if (flow_rect_contains(sr, screen)) return n->id;
+  int *order = flow__node_order(f, 0);                /* topmost-descendant first */
+  int hit = -1;
+  for (int k = 0; k < f->nnodes; k++) {
+    flow_node *n = &f->nodes[order ? order[k] : k];
+    flow_rect sr = flow__node_footprint(f, n, lod);   /* exact footprint the renderer draws */
+    if (flow_rect_contains(sr, screen)) { hit = n->id; break; }
   }
-  return -1;
+  free(order);
+  return hit;
 }
 void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; }
 flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->view, world_abs); }

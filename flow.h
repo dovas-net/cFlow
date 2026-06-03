@@ -62,7 +62,12 @@ enum { FLOW_BOLD = 1u, FLOW_REVERSE = 2u, FLOW_DIM = 4u, FLOW_UNDERLINE = 8u };
 typedef struct { uint32_t ch; uint8_t fg, bg, attr; } flow_cell;
 
 typedef struct { flow_cell *cells; int w, h; } flow_cellbuf;
-struct flow_surface { flow_cellbuf *cb; int ox, oy, w, h; };
+/* clip_x/clip_y/clip_w/clip_h are in BUFFER coords (an absolute window inside cb);
+   flow_put ANDs them in alongside the logical (w/h) and physical (cb-bounds) clips.
+   For an unclipped surface set the clip to the full buffer {0,0,cb->w,cb->h}. An
+   EMPTY clip (w<=0 or h<=0) suppresses every write — that's how a child fully outside
+   its ancestor frame is cut away. */
+struct flow_surface { flow_cellbuf *cb; int ox, oy, w, h; int clip_x, clip_y, clip_w, clip_h; };
 typedef struct flow_surface flow_surface;
 
 /* route output type — declared here so the edge vtable can reference it; impl in flow_route.h */
@@ -117,7 +122,10 @@ void flow_cellbuf_put(flow_cellbuf *cb, int x, int y, uint32_t ch, uint8_t fg, u
 }
 void flow_put(flow_surface *s, int x, int y, uint32_t ch, uint8_t fg, uint8_t bg, uint8_t attr) {
   if (x < 0 || y < 0 || x >= s->w || y >= s->h) return;            /* logical clip to node box */
-  flow_cellbuf_put(s->cb, s->ox + x, s->oy + y, ch, fg, bg, attr); /* physical clip to buffer  */
+  int bx = s->ox + x, by = s->oy + y;                              /* buffer-space cell */
+  if (bx < s->clip_x || by < s->clip_y ||
+      bx >= s->clip_x + s->clip_w || by >= s->clip_y + s->clip_h) return; /* clip-rect clip */
+  flow_cellbuf_put(s->cb, bx, by, ch, fg, bg, attr);              /* physical clip to buffer  */
 }
 void flow_text(flow_surface *s, int x, int y, const char *u, uint8_t fg, uint8_t bg, uint8_t attr) {
   int i = 0; while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n; flow_put(s, x + i, y, cp, fg, bg, attr); i++; }
@@ -211,6 +219,21 @@ flow_node *flow_nodes(flow_t *f);
 flow_edge *flow_edges(flow_t *f);
 flow_pt   flow_node_abs(flow_t *f, const flow_node *n);
 flow_rect flow_node_rect_abs(flow_t *f, const flow_node *n);
+flow_pt   flow_node_pos(const flow_node *n);  /* relative (stored) position; companion to flow_node_abs */
+
+/* subflows / groups — parent-relative coordinates + group container management.
+   flow_set_parent: reparent `child` under `parent` (-1 detaches to top level), converting
+     child->pos so its ABSOLUTE world position is unchanged. Rejects cycles (parent==child
+     or parent is a descendant of child) and missing ids. Array order/ids unchanged.
+   flow_group: create a `group` container enclosing the given node ids (world bbox+padding),
+     reparent each under it (abs preserved); returns the new group id (-1 if none valid).
+   flow_ungroup: reparent every direct child OUT to the group's own parent (abs preserved),
+     THEN remove the now-childless container — children SURVIVE (unlike flow_remove_node).
+   flow_is_ancestor: 1 if `maybe_ancestor` is `node` or any ancestor of `node`. */
+void flow_set_parent(flow_t *f, int child, int parent);
+int  flow_group(flow_t *f, const int *ids, int n);
+void flow_ungroup(flow_t *f, int id);
+int  flow_is_ancestor(flow_t *f, int maybe_ancestor, int node);
 flow_rect flow_bounds(flow_t *f);
 int       flow_hit_node(flow_t *f, flow_pt screen);
 void      flow_pan(flow_t *f, int dx, int dy);
@@ -372,8 +395,77 @@ int flow_add_node(flow_t *f, const char *type, flow_pt pos, void *data) {
   return n->id;
 }
 void flow_move_node(flow_t *f, int id, flow_pt pos) {
+  /* ABSOLUTE-in contract: `pos` is a world-absolute target. Store it parent-relative so
+     a child stays under the cursor. For top-level nodes (parent==-1) parent_abs=={0,0},
+     so n->pos == pos — byte-identical to the pre-groups behaviour for every existing caller. */
   flow_node *n = flow_get_node(f, id);
-  if (n) n->pos = pos;   /* increment 1/2a: top-level nodes only, so pos == absolute */
+  if (!n) return;
+  flow_pt pa = { 0, 0 };
+  if (n->parent != -1) { flow_node *p = flow_get_node(f, n->parent); if (p) pa = flow_node_abs(f, p); }
+  n->pos.x = pos.x - pa.x; n->pos.y = pos.y - pa.y;
+}
+flow_pt flow_node_pos(const flow_node *n) { return n->pos; }
+/* depth = length of the parent chain (0 for top-level). O(depth) walk, cycle-guarded. */
+static int flow__node_depth(flow_t *f, const flow_node *n) {
+  int d = 0, parent = n->parent, guard = 0;
+  while (parent != -1 && guard++ < 1024) { flow_node *pn = flow_get_node(f, parent); if (!pn) break; d++; parent = pn->parent; }
+  return d;
+}
+int flow_is_ancestor(flow_t *f, int maybe_ancestor, int node) {
+  int cur = node, guard = 0;                       /* maybe_ancestor==node counts (chain includes self) */
+  while (cur != -1 && guard++ < 1024) {
+    if (cur == maybe_ancestor) return 1;
+    flow_node *n = flow_get_node(f, cur); if (!n) break; cur = n->parent;
+  }
+  return 0;
+}
+void flow_set_parent(flow_t *f, int child, int parent) {
+  flow_node *c = flow_get_node(f, child);
+  if (!c) return;
+  if (parent == child) return;                     /* trivial self-parent */
+  if (parent != -1) {
+    if (!flow_get_node(f, parent)) return;         /* missing parent id */
+    if (flow_is_ancestor(f, child, parent)) return;/* cycle: parent is a descendant of child */
+  }
+  /* read both abs positions while the OLD parent chain is still intact */
+  flow_pt cabs = flow_node_abs(f, c);
+  flow_pt pabs = { 0, 0 };
+  if (parent != -1) { flow_node *p = flow_get_node(f, parent); pabs = flow_node_abs(f, p); }
+  c->parent = parent;
+  c->pos.x = cabs.x - pabs.x; c->pos.y = cabs.y - pabs.y;   /* abs preserved across the move */
+}
+int flow_group(flow_t *f, const int *ids, int n) {
+  if (!ids || n <= 0) return -1;
+  /* world bbox of the valid member ids (pointers valid only before flow_add_node) */
+  flow_rect bb = {0,0,0,0}; int have = 0;
+  for (int i = 0; i < n; i++) {
+    flow_node *m = flow_get_node(f, ids[i]); if (!m) continue;
+    flow_rect mr = flow_node_rect_abs(f, m);
+    bb = have ? flow_rect_union(bb, mr) : mr; have = 1;
+  }
+  if (!have) return -1;
+  const int pad = 1;
+  flow_pt gpos = { bb.x - pad, bb.y - pad };
+  int gw = bb.w + 2 * pad, gh = bb.h + 2 * pad;
+  int gid = flow_add_node(f, "group", gpos, NULL);   /* measure is a no-op write-back; w/h set next */
+  flow_node *g = flow_get_node(f, gid);              /* re-fetch: array may have realloc'd */
+  if (g) { g->w = gw; g->h = gh; }
+  for (int i = 0; i < n; i++) {                       /* reparent members (abs preserved) */
+    if (flow_get_node(f, ids[i])) flow_set_parent(f, ids[i], gid);
+  }
+  return gid;
+}
+void flow_ungroup(flow_t *f, int id) {
+  flow_node *g = flow_get_node(f, id);
+  if (!g || strcmp(g->type, "group") != 0) return;   /* no-op if missing or not a group */
+  int gparent = g->parent;
+  for (;;) {                                          /* reparent each direct child OUT (abs preserved) */
+    int childid = -1;
+    for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].parent == id) { childid = f->nodes[i].id; break; }
+    if (childid == -1) break;
+    flow_set_parent(f, childid, gparent);             /* re-find by id each step (array stable here, but safe) */
+  }
+  flow_remove_node(f, id);                             /* now childless: removes only the container */
 }
 int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   if (src == dst) return -1;
@@ -421,14 +513,54 @@ static flow_rect flow__node_footprint(flow_t *f, const flow_node *n, int lod) {
   if (lod) { flow_rect r = { s.x, s.y, 1, 1 }; return r; }  /* collapsed marker: 1x1 at top-left */
   flow_rect r = { s.x, s.y, wr.w, wr.h }; return r;          /* full box (constant glyph size) */
 }
+/* Depth-aware visit order. Array order is NO LONGER a valid z/hit order once groups
+   exist (a group appended at the tail must draw UNDER its earlier children and never
+   steal their hits). We build a TRANSIENT index list each pass (the nodes[] array,
+   ids, serialize and flow_get_node stay untouched) sorted by a stable key:
+     RENDER (want_render=1): depth ASC, then unselected-before-selected, then array idx ASC
+       — parent-before-child DOMINATES; selected-last applies only AMONG SIBLINGS.
+     HIT    (want_render=0): depth DESC, then array idx DESC (no selection term)
+       — topmost descendant first; for all-top-level scenes this reduces to reverse-array,
+         keeping every existing hit-order golden byte-identical.
+   idx is a unique final tiebreaker so qsort is deterministic. Caller frees the list. */
+typedef struct { int idx, depth, sel; } flow__order_ent;
+static int flow__order_cmp_render(const void *pa, const void *pb) {
+  const flow__order_ent *a = (const flow__order_ent*)pa, *b = (const flow__order_ent*)pb;
+  if (a->depth != b->depth) return a->depth - b->depth;   /* depth asc */
+  if (a->sel  != b->sel)   return a->sel  - b->sel;       /* unselected(0) before selected(1) */
+  return a->idx - b->idx;                                 /* array idx asc */
+}
+static int flow__order_cmp_hit(const void *pa, const void *pb) {
+  const flow__order_ent *a = (const flow__order_ent*)pa, *b = (const flow__order_ent*)pb;
+  if (a->depth != b->depth) return b->depth - a->depth;   /* depth desc */
+  return b->idx - a->idx;                                 /* array idx desc */
+}
+/* Allocate + fill an ordered index list (length f->nnodes). Returns NULL when empty. */
+static int *flow__node_order(flow_t *f, int want_render) {
+  if (f->nnodes <= 0) return NULL;
+  flow__order_ent *ents = (flow__order_ent*)malloc((size_t)f->nnodes * sizeof *ents);
+  if (!ents) return NULL;
+  for (int i = 0; i < f->nnodes; i++) {
+    ents[i].idx = i; ents[i].depth = flow__node_depth(f, &f->nodes[i]);
+    ents[i].sel = (f->nodes[i].flags & FLOW_SELECTED) ? 1 : 0;
+  }
+  qsort(ents, (size_t)f->nnodes, sizeof *ents, want_render ? flow__order_cmp_render : flow__order_cmp_hit);
+  int *order = (int*)malloc((size_t)f->nnodes * sizeof(int));
+  if (order) for (int i = 0; i < f->nnodes; i++) order[i] = ents[i].idx;
+  free(ents);
+  return order;
+}
 int flow_hit_node(flow_t *f, flow_pt screen) {
   int lod = flow__lod_for(f, f->view.zoom);
-  for (int i = f->nnodes - 1; i >= 0; i--) {        /* topmost first */
-    flow_node *n = &f->nodes[i];
-    flow_rect sr = flow__node_footprint(f, n, lod);  /* exact footprint the renderer draws */
-    if (flow_rect_contains(sr, screen)) return n->id;
+  int *order = flow__node_order(f, 0);                /* topmost-descendant first */
+  int hit = -1;
+  for (int k = 0; k < f->nnodes; k++) {
+    flow_node *n = &f->nodes[order ? order[k] : k];
+    flow_rect sr = flow__node_footprint(f, n, lod);   /* exact footprint the renderer draws */
+    if (flow_rect_contains(sr, screen)) { hit = n->id; break; }
   }
-  return -1;
+  free(order);
+  return hit;
 }
 void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; }
 flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->view, world_abs); }
@@ -868,6 +1000,7 @@ void flow_route_straight(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_ro
 /* ===================== src/flow_types.h ===================== */
 /* ===== default node type (data = C-string label) + register-defaults ===== */
 extern const flow_node_type flow_default_node_type;
+extern const flow_node_type flow_group_node_type;  /* built-in "group" container; registered by flow_register_defaults */
 extern const flow_handle flow_default_handles[2];  /* LEFT target 'in', RIGHT source 'out' */
 void flow_register_defaults(flow_t *f);
 
@@ -892,8 +1025,28 @@ const flow_handle flow_default_handles[2] = {
   { "out", FLOW_HANDLE_SOURCE, FLOW_RIGHT, 0 },   /* output on right border */
 };
 const flow_node_type flow_default_node_type = { "default", flow__default_measure, flow__default_render, flow_default_handles, 2, NULL, NULL };
+/* group container: measure is a WRITE-BACK no-op — flow_measure_node does
+   `int w=0,h=0; measure(n,&w,&h); n->w=w; n->h=h;`, so to leave the caller-set bbox
+   size intact we must echo the node's CURRENT w/h back out (an empty body would zero
+   them). flow_group sets w/h from the member bbox after add. */
+static void flow__group_measure(const flow_node *n, int *w, int *h) { *w = n->w; *h = n->h; }
+static void flow__group_render(const flow_node *n, flow_surface *s, flow_render_ctx ctx) {
+  const char *label = n->data ? (const char*)n->data : "";
+  unsigned bold = (ctx.flags & FLOW_SELECTED) ? FLOW_BOLD : 0;
+  if (ctx.lod) {  /* collapsed: ONE marker at the top-left cell (matches flow__node_footprint) */
+    flow_put(s, 0, 0, 0x25A1, FLOW_FG, FLOW_BG, bold);   /* □ hollow square: container marker */
+    return;
+  }
+  flow_box(s, 0, 0, flow_surface_w(s), flow_surface_h(s), FLOW_FG, FLOW_BG, bold);  /* frame only */
+  if (label[0]) flow_text(s, 1, 0, label, FLOW_FG, FLOW_BG, bold);  /* title on the top border */
+}
+/* group has NO handles (containers aren't connectable in v1): handle_count==0 leaves
+   flow_hit_handle/edge anchoring untouched. No save/load hooks (parent is durable via the
+   node field; the app re-registers this type on load). */
+const flow_node_type flow_group_node_type = { "group", flow__group_measure, flow__group_render, NULL, 0, NULL, NULL };
 void flow_register_defaults(flow_t *f) {
   flow_register_node_type(f, &flow_default_node_type);
+  flow_register_node_type(f, &flow_group_node_type);
   flow_register_edge_type(f, &flow_default_edge_type);
   flow_register_edge_type(f, &flow_straight_edge_type);
 }
@@ -936,7 +1089,7 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
     case FLOW_CORNER_BL: ox = 0;          oy = cb->h - bh; break;
     default:             ox = cb->w - bw; oy = cb->h - bh; break;  /* BR */
   }
-  flow_surface s = { cb, ox, oy, bw, bh };
+  flow_surface s = { cb, ox, oy, bw, bh, 0, 0, cb->w, cb->h };  /* full-buffer clip (no extra clip) */
   flow_box(&s, 0, 0, bw, bh, FLOW_FG, FLOW_BG, 0);
   /* opaque panel: blank the interior so the background grid / edges / nodes
      underneath don't bleed through (flow_box strokes the border only) */
@@ -1040,6 +1193,27 @@ int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
   }
   return -1;
 }
+/* Buffer-space clip for a node = intersection of the screen rect and EVERY ancestor's
+   drawn footprint (so a child is cut to its parent's frame, composing through zoom because
+   flow__node_footprint projects abs). Top-level nodes (no ancestors) get the full screen
+   rect — byte-identical to the unclipped behaviour. Returned rect is in BUFFER coords;
+   an empty result (w<=0/h<=0) suppresses all of the node's writes via flow_put. */
+static flow_rect flow__node_clip(flow_t *f, const flow_node *n, int lod, int cols, int rows) {
+  flow_rect clip = { 0, 0, cols, rows };
+  int parent = n->parent, guard = 0;
+  while (parent != -1 && guard++ < 1024) {
+    flow_node *pn = flow_get_node(f, parent); if (!pn) break;
+    flow_rect fp = flow__node_footprint(f, pn, lod);   /* ancestor's drawn screen rect */
+    int x0 = clip.x > fp.x ? clip.x : fp.x;
+    int y0 = clip.y > fp.y ? clip.y : fp.y;
+    int x1 = (clip.x + clip.w) < (fp.x + fp.w) ? (clip.x + clip.w) : (fp.x + fp.w);
+    int y1 = (clip.y + clip.h) < (fp.y + fp.h) ? (clip.y + clip.h) : (fp.y + fp.h);
+    clip.x = x0; clip.y = y0; clip.w = x1 - x0; clip.h = y1 - y0;
+    if (clip.w < 0) clip.w = 0; if (clip.h < 0) clip.h = 0;
+    parent = pn->parent;
+  }
+  return clip;
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
@@ -1068,22 +1242,27 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     free(rt.cells);
   }
 
-  /* nodes on top — TWO passes over the same array so selected nodes draw LAST
-     (on top), with insertion order preserved within each pass. pass 0: unselected,
-     pass 1: selected. */
-  for (int pass = 0; pass < 2; pass++) {
-    for (int i = 0; i < flow_node_count(f); i++) {
-      flow_node *n = &flow_nodes(f)[i];
-      int sel = (n->flags & FLOW_SELECTED) ? 1 : 0;
-      if (sel != pass) continue;
+  /* nodes on top — visited in depth-aware order (parent-before-child DOMINATES;
+     selected-last applies only among siblings) so a group frame draws UNDER its children
+     while still drawing under a selected sibling. Each node's surface carries a clip rect =
+     intersection of its ancestor frames, so children are cut to their parent's box.
+     For all-top-level scenes this reduces to the prior unselected-then-selected order with
+     a full-screen clip — byte-identical output. */
+  {
+    int lod = flow__lod_for(f, f->view.zoom);
+    int *order = flow__node_order(f, 1);
+    for (int k = 0; k < flow_node_count(f); k++) {
+      flow_node *n = &flow_nodes(f)[order ? order[k] : k];
       flow_rect wr = flow_node_rect_abs(f, n);
       flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
       const flow_node_type *nt = flow_node_type_for(f, n->type);
       if (!nt || !nt->render) continue;
-      flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
-      flow_render_ctx ctx = { f->view.zoom, n->flags, flow__lod_for(f, f->view.zoom) };
+      flow_rect clip = flow__node_clip(f, n, lod, cols, rows);
+      flow_surface surf = { &cb, s.x, s.y, n->w, n->h, clip.x, clip.y, clip.w, clip.h };
+      flow_render_ctx ctx = { f->view.zoom, n->flags, lod };
       nt->render(n, &surf, ctx);
     }
+    free(order);
   }
 
   /* handle markers: only on hovered/selected nodes (xyflow reveals on hover), plus
@@ -1139,12 +1318,12 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   }
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
-  if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
+  if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 
   /* built-in status/help bar: drawn LAST (after the app overlay) on the bottom
      row only, so it never fights the app's overlay on other rows. */
   if (f->statusbar && rows > 0) {
-    flow_surface s = { &cb, 0, rows - 1, cols, 1 };
+    flow_surface s = { &cb, 0, rows - 1, cols, 1, 0, 0, cols, rows };  /* full-buffer clip */
     for (int x = 0; x < cols; x++) flow_put(&s, x, 0, ' ', FLOW_FG, FLOW_BG, FLOW_REVERSE);
     flow_text(&s, 0, 0, " n:add  x:del  f:fit  ?:help  q:quit ", FLOW_FG, FLOW_BG, FLOW_REVERSE);
   }
@@ -1704,12 +1883,27 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
                        (wa.y < wc.y ? wc.y - wa.y : wa.y - wc.y) };
       flow_select_in_rect(f, wr, f->marquee_mode, 0);
     } else if (f->drag_node != -1) {
-      if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift whole set by per-motion world delta */
+      if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift the set by per-motion world delta */
         flow_pt w = flow_to_world(f, scr);
         int dx = w.x - f->drag_last_world.x, dy = w.y - f->drag_last_world.y;
         if (dx || dy) {
-          for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) {
-            flow_pt p = f->nodes[i].pos; flow_move_node(f, f->nodes[i].id, (flow_pt){ p.x + dx, p.y + dy });
+          /* Apply the delta ONLY to selection ROOTS — selected nodes with no SELECTED
+             ancestor. A root's selected descendants follow for free via relative coords;
+             applying the delta to them too would double-move. flow_move_node is absolute-in,
+             so a root moves to node_abs+delta. (All-top-level sets: every node is a root =>
+             byte-identical to the prior per-node delta.) */
+          for (int i = 0; i < f->nnodes; i++) {
+            if (!(f->nodes[i].flags & FLOW_SELECTED)) continue;
+            int root = 1;                          /* root unless a STRICT ancestor is selected */
+            int parent = f->nodes[i].parent, guard = 0;
+            while (parent != -1 && guard++ < 1024) {
+              flow_node *pn = flow_get_node(f, parent); if (!pn) break;
+              if (pn->flags & FLOW_SELECTED) { root = 0; break; }
+              parent = pn->parent;
+            }
+            if (!root) continue;
+            flow_pt a = flow_node_abs(f, &f->nodes[i]);
+            flow_move_node(f, f->nodes[i].id, (flow_pt){ a.x + dx, a.y + dy });
           }
           f->drag_last_world = w;
         }
@@ -1756,6 +1950,32 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           flow_clear_selection(f);
           if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
         }
+      }
+    } else if (f->moved && f->drag_node != -1 && flow_selected_count(f) == 1) {
+      /* DRAG-TO-REPARENT (single-node drag only for v1). On drop, hit-test the cursor for a
+         `group` node — skipping the dragged node AND its own descendants (avoid self-parent).
+         A group hit that differs from the current parent reparents (abs preserved => the node
+         stays visually put). Dropping on the empty pane while parented detaches to top level.
+         flow_hit_node returns the TOPMOST descendant, so we walk the array for a group whose
+         footprint contains the drop cell, honouring the same skip rule. */
+      int dragged = f->drag_node;
+      flow_node *dn = flow_get_node(f, dragged);
+      int cur_parent = dn ? dn->parent : -1;
+      int target = -1;                            /* the group to drop into, or -1 */
+      int lod = flow__lod_for(f, f->view.zoom);
+      int *order = flow__node_order(f, 0);        /* topmost-descendant first */
+      for (int k = 0; k < f->nnodes; k++) {
+        flow_node *cand = &f->nodes[order ? order[k] : k];
+        if (strcmp(cand->type, "group") != 0) continue;          /* only group containers */
+        if (flow_is_ancestor(f, dragged, cand->id)) continue;    /* skip self + own descendants */
+        flow_rect fp = flow__node_footprint(f, cand, lod);
+        if (flow_rect_contains(fp, scr)) { target = cand->id; break; }
+      }
+      free(order);
+      if (target != -1) {
+        if (target != cur_parent) flow_set_parent(f, dragged, target);
+      } else if (cur_parent != -1) {
+        flow_set_parent(f, dragged, -1);          /* dropped on empty pane: detach to top level */
       }
     }
     /* marquee finalize: selection already applied during motion; just clear state.

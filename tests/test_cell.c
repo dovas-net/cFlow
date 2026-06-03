@@ -27,7 +27,7 @@ int main(void) {
   flow_cell buf[10 * 4];
   flow_cellbuf cb = { buf, 10, 4 };
   flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
-  flow_surface s = { &cb, 0, 0, 6, 3 };
+  flow_surface s = { &cb, 0, 0, 6, 3, 0, 0, 10, 4 };  /* full-buffer clip (cb is 10x4) */
   flow_box(&s, 0, 0, 6, 3, FLOW_FG, FLOW_BG, 0);
   flow_text(&s, 2, 1, "hi", FLOW_FG, FLOW_BG, 0);
   ASSERT_INT(buf[0].ch, 0x250C, "top-left corner");

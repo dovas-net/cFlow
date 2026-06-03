@@ -5,7 +5,12 @@ enum { FLOW_BOLD = 1u, FLOW_REVERSE = 2u, FLOW_DIM = 4u, FLOW_UNDERLINE = 8u };
 typedef struct { uint32_t ch; uint8_t fg, bg, attr; } flow_cell;
 
 typedef struct { flow_cell *cells; int w, h; } flow_cellbuf;
-struct flow_surface { flow_cellbuf *cb; int ox, oy, w, h; };
+/* clip_x/clip_y/clip_w/clip_h are in BUFFER coords (an absolute window inside cb);
+   flow_put ANDs them in alongside the logical (w/h) and physical (cb-bounds) clips.
+   For an unclipped surface set the clip to the full buffer {0,0,cb->w,cb->h}. An
+   EMPTY clip (w<=0 or h<=0) suppresses every write — that's how a child fully outside
+   its ancestor frame is cut away. */
+struct flow_surface { flow_cellbuf *cb; int ox, oy, w, h; int clip_x, clip_y, clip_w, clip_h; };
 typedef struct flow_surface flow_surface;
 
 /* route output type — declared here so the edge vtable can reference it; impl in flow_route.h */
@@ -60,7 +65,10 @@ void flow_cellbuf_put(flow_cellbuf *cb, int x, int y, uint32_t ch, uint8_t fg, u
 }
 void flow_put(flow_surface *s, int x, int y, uint32_t ch, uint8_t fg, uint8_t bg, uint8_t attr) {
   if (x < 0 || y < 0 || x >= s->w || y >= s->h) return;            /* logical clip to node box */
-  flow_cellbuf_put(s->cb, s->ox + x, s->oy + y, ch, fg, bg, attr); /* physical clip to buffer  */
+  int bx = s->ox + x, by = s->oy + y;                              /* buffer-space cell */
+  if (bx < s->clip_x || by < s->clip_y ||
+      bx >= s->clip_x + s->clip_w || by >= s->clip_y + s->clip_h) return; /* clip-rect clip */
+  flow_cellbuf_put(s->cb, bx, by, ch, fg, bg, attr);              /* physical clip to buffer  */
 }
 void flow_text(flow_surface *s, int x, int y, const char *u, uint8_t fg, uint8_t bg, uint8_t attr) {
   int i = 0; while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n; flow_put(s, x + i, y, cp, fg, bg, attr); i++; }

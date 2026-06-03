@@ -35,7 +35,7 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
     case FLOW_CORNER_BL: ox = 0;          oy = cb->h - bh; break;
     default:             ox = cb->w - bw; oy = cb->h - bh; break;  /* BR */
   }
-  flow_surface s = { cb, ox, oy, bw, bh };
+  flow_surface s = { cb, ox, oy, bw, bh, 0, 0, cb->w, cb->h };  /* full-buffer clip (no extra clip) */
   flow_box(&s, 0, 0, bw, bh, FLOW_FG, FLOW_BG, 0);
   /* opaque panel: blank the interior so the background grid / edges / nodes
      underneath don't bleed through (flow_box strokes the border only) */
@@ -139,6 +139,27 @@ int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
   }
   return -1;
 }
+/* Buffer-space clip for a node = intersection of the screen rect and EVERY ancestor's
+   drawn footprint (so a child is cut to its parent's frame, composing through zoom because
+   flow__node_footprint projects abs). Top-level nodes (no ancestors) get the full screen
+   rect — byte-identical to the unclipped behaviour. Returned rect is in BUFFER coords;
+   an empty result (w<=0/h<=0) suppresses all of the node's writes via flow_put. */
+static flow_rect flow__node_clip(flow_t *f, const flow_node *n, int lod, int cols, int rows) {
+  flow_rect clip = { 0, 0, cols, rows };
+  int parent = n->parent, guard = 0;
+  while (parent != -1 && guard++ < 1024) {
+    flow_node *pn = flow_get_node(f, parent); if (!pn) break;
+    flow_rect fp = flow__node_footprint(f, pn, lod);   /* ancestor's drawn screen rect */
+    int x0 = clip.x > fp.x ? clip.x : fp.x;
+    int y0 = clip.y > fp.y ? clip.y : fp.y;
+    int x1 = (clip.x + clip.w) < (fp.x + fp.w) ? (clip.x + clip.w) : (fp.x + fp.w);
+    int y1 = (clip.y + clip.h) < (fp.y + fp.h) ? (clip.y + clip.h) : (fp.y + fp.h);
+    clip.x = x0; clip.y = y0; clip.w = x1 - x0; clip.h = y1 - y0;
+    if (clip.w < 0) clip.w = 0; if (clip.h < 0) clip.h = 0;
+    parent = pn->parent;
+  }
+  return clip;
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
@@ -167,22 +188,27 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     free(rt.cells);
   }
 
-  /* nodes on top — TWO passes over the same array so selected nodes draw LAST
-     (on top), with insertion order preserved within each pass. pass 0: unselected,
-     pass 1: selected. */
-  for (int pass = 0; pass < 2; pass++) {
-    for (int i = 0; i < flow_node_count(f); i++) {
-      flow_node *n = &flow_nodes(f)[i];
-      int sel = (n->flags & FLOW_SELECTED) ? 1 : 0;
-      if (sel != pass) continue;
+  /* nodes on top — visited in depth-aware order (parent-before-child DOMINATES;
+     selected-last applies only among siblings) so a group frame draws UNDER its children
+     while still drawing under a selected sibling. Each node's surface carries a clip rect =
+     intersection of its ancestor frames, so children are cut to their parent's box.
+     For all-top-level scenes this reduces to the prior unselected-then-selected order with
+     a full-screen clip — byte-identical output. */
+  {
+    int lod = flow__lod_for(f, f->view.zoom);
+    int *order = flow__node_order(f, 1);
+    for (int k = 0; k < flow_node_count(f); k++) {
+      flow_node *n = &flow_nodes(f)[order ? order[k] : k];
       flow_rect wr = flow_node_rect_abs(f, n);
       flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
       const flow_node_type *nt = flow_node_type_for(f, n->type);
       if (!nt || !nt->render) continue;
-      flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
-      flow_render_ctx ctx = { f->view.zoom, n->flags, flow__lod_for(f, f->view.zoom) };
+      flow_rect clip = flow__node_clip(f, n, lod, cols, rows);
+      flow_surface surf = { &cb, s.x, s.y, n->w, n->h, clip.x, clip.y, clip.w, clip.h };
+      flow_render_ctx ctx = { f->view.zoom, n->flags, lod };
       nt->render(n, &surf, ctx);
     }
+    free(order);
   }
 
   /* handle markers: only on hovered/selected nodes (xyflow reveals on hover), plus
@@ -238,12 +264,12 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   }
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
-  if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
+  if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 
   /* built-in status/help bar: drawn LAST (after the app overlay) on the bottom
      row only, so it never fights the app's overlay on other rows. */
   if (f->statusbar && rows > 0) {
-    flow_surface s = { &cb, 0, rows - 1, cols, 1 };
+    flow_surface s = { &cb, 0, rows - 1, cols, 1, 0, 0, cols, rows };  /* full-buffer clip */
     for (int x = 0; x < cols; x++) flow_put(&s, x, 0, ' ', FLOW_FG, FLOW_BG, FLOW_REVERSE);
     flow_text(&s, 0, 0, " n:add  x:del  f:fit  ?:help  q:quit ", FLOW_FG, FLOW_BG, FLOW_REVERSE);
   }

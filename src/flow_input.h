@@ -159,12 +159,27 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
                        (wa.y < wc.y ? wc.y - wa.y : wa.y - wc.y) };
       flow_select_in_rect(f, wr, f->marquee_mode, 0);
     } else if (f->drag_node != -1) {
-      if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift whole set by per-motion world delta */
+      if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift the set by per-motion world delta */
         flow_pt w = flow_to_world(f, scr);
         int dx = w.x - f->drag_last_world.x, dy = w.y - f->drag_last_world.y;
         if (dx || dy) {
-          for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) {
-            flow_pt p = f->nodes[i].pos; flow_move_node(f, f->nodes[i].id, (flow_pt){ p.x + dx, p.y + dy });
+          /* Apply the delta ONLY to selection ROOTS — selected nodes with no SELECTED
+             ancestor. A root's selected descendants follow for free via relative coords;
+             applying the delta to them too would double-move. flow_move_node is absolute-in,
+             so a root moves to node_abs+delta. (All-top-level sets: every node is a root =>
+             byte-identical to the prior per-node delta.) */
+          for (int i = 0; i < f->nnodes; i++) {
+            if (!(f->nodes[i].flags & FLOW_SELECTED)) continue;
+            int root = 1;                          /* root unless a STRICT ancestor is selected */
+            int parent = f->nodes[i].parent, guard = 0;
+            while (parent != -1 && guard++ < 1024) {
+              flow_node *pn = flow_get_node(f, parent); if (!pn) break;
+              if (pn->flags & FLOW_SELECTED) { root = 0; break; }
+              parent = pn->parent;
+            }
+            if (!root) continue;
+            flow_pt a = flow_node_abs(f, &f->nodes[i]);
+            flow_move_node(f, f->nodes[i].id, (flow_pt){ a.x + dx, a.y + dy });
           }
           f->drag_last_world = w;
         }
@@ -211,6 +226,32 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           flow_clear_selection(f);
           if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
         }
+      }
+    } else if (f->moved && f->drag_node != -1 && flow_selected_count(f) == 1) {
+      /* DRAG-TO-REPARENT (single-node drag only for v1). On drop, hit-test the cursor for a
+         `group` node — skipping the dragged node AND its own descendants (avoid self-parent).
+         A group hit that differs from the current parent reparents (abs preserved => the node
+         stays visually put). Dropping on the empty pane while parented detaches to top level.
+         flow_hit_node returns the TOPMOST descendant, so we walk the array for a group whose
+         footprint contains the drop cell, honouring the same skip rule. */
+      int dragged = f->drag_node;
+      flow_node *dn = flow_get_node(f, dragged);
+      int cur_parent = dn ? dn->parent : -1;
+      int target = -1;                            /* the group to drop into, or -1 */
+      int lod = flow__lod_for(f, f->view.zoom);
+      int *order = flow__node_order(f, 0);        /* topmost-descendant first */
+      for (int k = 0; k < f->nnodes; k++) {
+        flow_node *cand = &f->nodes[order ? order[k] : k];
+        if (strcmp(cand->type, "group") != 0) continue;          /* only group containers */
+        if (flow_is_ancestor(f, dragged, cand->id)) continue;    /* skip self + own descendants */
+        flow_rect fp = flow__node_footprint(f, cand, lod);
+        if (flow_rect_contains(fp, scr)) { target = cand->id; break; }
+      }
+      free(order);
+      if (target != -1) {
+        if (target != cur_parent) flow_set_parent(f, dragged, target);
+      } else if (cur_parent != -1) {
+        flow_set_parent(f, dragged, -1);          /* dropped on empty pane: detach to top level */
       }
     }
     /* marquee finalize: selection already applied during motion; just clear state.
