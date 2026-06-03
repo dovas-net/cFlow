@@ -127,6 +127,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           f->reconnect_edge = eedge; f->reconnect_which = which;
           f->mouse_down = 1; f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
           f->down_modsel = 0; f->marquee_active = 0;
+          flow__undo_begin(f);                 /* reconnect gesture = one undo step (closed on release) */
           return;
         }
       }
@@ -171,6 +172,8 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
         f->drag_node = f->down_node; f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;
         f->drag_last_world = flow_to_world(f, f->down_pos);   /* multi-drag delta anchor */
+        flow__undo_begin(f);                     /* whole drag gesture (single OR multi) = one undo step;
+                                                    closed on release iff drag_node is still armed */
         if (!(nd->flags & FLOW_SELECTED))        /* unselected node: plain drag REPLACES selection */
           flow_select_node(f, f->down_node, 0);  /* selectNodesOnDrag; selected node keeps the set (group drag) */
       } else {
@@ -239,6 +242,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->reconnect_edge = -1; f->mouse_down = 0; f->moved = 0; f->down_node = -1;
       f->drag_node = -1; f->dragging_pan = 0; f->down_modsel = 0;
       f->marquee_active = 0; f->marquee_on = 0;
+      flow__undo_end(f);                       /* pairs with the press-time begin (no-drag click: empty txn) */
       return;
     }
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
@@ -297,6 +301,8 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     }
     /* marquee finalize: selection already applied during motion; just clear state.
        A marqueed drag sets moved==1, so on_pane_click was never fired. */
+    if (f->drag_node != -1) flow__undo_end(f);   /* close the drag gesture txn (begin fired iff drag armed);
+                                                    placed AFTER drop-reparent so it joins the same undo step */
     if (f->moved) f->last_click_node = -1;       /* any drag breaks a double-click pair */
     f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
     f->down_modsel = 0; f->marquee_active = 0; f->marquee_on = 0;

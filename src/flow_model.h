@@ -120,6 +120,62 @@ int  flow_add_node_center(flow_t *f, const char *type, void *data); /* add at wo
 void flow_fit_view(flow_t *f, int margin); /* getViewportForBounds: pick zoom+pan so flow_bounds fits with `margin` cells of padding (zoom clamped to [zmin,zmax]); no-op when empty */
 void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom help/status line */
 
+/* ---- undo/redo: capped inverse-op command journal (spec §11) ----
+   Every recorded mutator (add/remove node+edge, move, reconnect, set-label, reparent)
+   pushes an inverse-op record keyed on STABLE ids; flow_undo/flow_redo replay inverses.
+   One journal command == one user-visible undo STEP: a transaction bracket
+   (flow__undo_begin/end) coalesces a whole gesture (multi-drag, group/ungroup,
+   add-node-center, connect, delete-selection) into a single command. Selection and
+   viewport zoom/pan/fit are deliberately NOT journaled (spec §11 omits them).
+   Definitions live in src/flow_undo.h (amalgamated after flow_model) because applying
+   an inverse calls the mutators defined here. */
+void flow_undo(flow_t *f);        /* pop the top command, apply its inverse; no-op if empty */
+void flow_redo(flow_t *f);        /* re-apply the last undone command; no-op if redo stack empty */
+int  flow_can_undo(flow_t *f);
+int  flow_can_redo(flow_t *f);
+void flow_set_undo_limit(flow_t *f, int max_commands); /* cap history depth (default 128); evicting the
+                                     oldest frees its label copies (drops, never frees, node->data ptrs).
+                                     0 = disable journaling entirely; negative clamps to 0. */
+
+/* internal recording/txn primitives, DECLARED here, DEFINED in flow_model.h's impl block.
+   Pure data push — they never call mutators, so flow_model.h code may invoke them even
+   though flow_undo/flow_redo (which DO call mutators) are defined later, in flow_undo.h. */
+void flow__undo_begin(flow_t *f); /* open a coalescing transaction (nestable via depth counter) */
+void flow__undo_end(flow_t *f);   /* close the innermost transaction */
+
+typedef enum {
+  FLOW_CMD_ADD_NODE, FLOW_CMD_REMOVE_NODE,   /* REMOVE_NODE snapshots the whole subtree */
+  FLOW_CMD_ADD_EDGE, FLOW_CMD_REMOVE_EDGE,
+  FLOW_CMD_MOVE_NODE, FLOW_CMD_RECONNECT_EDGE, FLOW_CMD_SET_LABEL,
+  FLOW_CMD_REPARENT                          /* groups: invert flow_set_parent/group/ungroup */
+} flow_cmd_kind;
+
+typedef struct { int id, index; flow_node node; } flow__node_snap;   /* node.data borrowed */
+typedef struct { int id, index; flow_edge edge; char *label_copy; } flow__edge_snap; /* edge.label points at label_copy */
+
+/* one leaf mutation record (tagged union). nid0/eid0 = f->nextid/f->nexteid for the
+   undo direction, nid1/eid1 for the redo direction (only ADD ops actually differ). */
+typedef struct flow__op {
+  flow_cmd_kind kind;
+  int nid0, eid0, nid1, eid1;
+  union {
+    struct { flow__node_snap snap; } node;                            /* ADD_NODE (snap refreshed at undo) */
+    struct { int root; flow__node_snap *nodes; int nn;
+             flow__edge_snap *edges; int ne; } subtree;               /* REMOVE_NODE */
+    struct { flow__edge_snap snap; } edge;                            /* ADD_EDGE / REMOVE_EDGE */
+    struct { int id; flow_pt from, to; } move;                        /* MOVE_NODE (ABSOLUTE coords) */
+    struct { int id, which, from_node, to_node;
+             char from_handle[16], to_handle[16]; } reconnect;        /* RECONNECT_EDGE */
+    struct { int id; char *from, *to; } label;                        /* SET_LABEL (owned dups, may be NULL) */
+    struct { int child, from_parent, to_parent;
+             flow_pt from_pos, to_pos; } reparent;                    /* REPARENT (stored-rel positions) */
+  } u;
+} flow__op;
+/* COMPOSITE representation: one command = the ordered op span of one undo step. Undo
+   applies inverses in REVERSE op order; redo re-applies forward. A transaction appends
+   all its ops into a single open command, so the whole gesture is one step. */
+struct flow__cmd { flow__op *ops; int nops, opcap; };
+
 /* callbacks — the library/app seam (panel content stays app-side, like xyflow <Panel>) */
 typedef struct {
   void (*on_overlay)(flow_t *f, flow_surface *screen, void *user);        /* draw HUD/panels last */
@@ -166,11 +222,177 @@ struct flow {
   struct { flow_bg_variant variant; int gap; } bg;
   struct { char seq[8]; flow_key_fn fn; void *user; } keys[32]; int nkeys;  /* key-binding registry */
   int statusbar;  /* built-in bottom help/status line */
+  struct {
+    struct flow__cmd *items; int n, cap;    /* undo stack (top = items[n-1]) */
+    struct flow__cmd *redo;  int rn, rcap;  /* redo stack */
+    int limit;                              /* max depth in STEPS (default 128); 0 = journaling disabled */
+    int applying;                           /* re-entrancy guard: 1 while undo/redo replays */
+    int suppress;                           /* >0 during flow_remove_node's internal cascade + flow_load's rebuild */
+    int txn_depth;                          /* >0 inside a coalescing transaction */
+    int txn_base;                           /* index of the open txn's command, or -1 (opens lazily on first record) */
+  } journal;
 };
 static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
   if (need <= *cap) return arr;
   int c = *cap ? *cap : 8; while (c < need) c *= 2;
   arr = realloc(arr, (size_t)c * sz); *cap = c; return arr;
+}
+/* ---- undo journal: recording primitives (PURE DATA — never call mutators, so they are
+   safe to invoke from this module; the appliers live in flow_undo.h, after flow_model) ---- */
+static char *flow__dup(const char *s) {            /* malloc+memcpy (codebase avoids strdup under -std=c11) */
+  if (!s) return NULL;
+  size_t n = strlen(s) + 1; char *d = (char*)malloc(n); if (d) memcpy(d, s, n); return d;
+}
+static void flow__op_free(flow__op *op) {          /* frees owned label copies; NEVER frees node->data */
+  switch (op->kind) {
+    case FLOW_CMD_REMOVE_NODE:
+      for (int i = 0; i < op->u.subtree.ne; i++) free(op->u.subtree.edges[i].label_copy);
+      free(op->u.subtree.nodes); free(op->u.subtree.edges); break;
+    case FLOW_CMD_ADD_EDGE: case FLOW_CMD_REMOVE_EDGE: free(op->u.edge.snap.label_copy); break;
+    case FLOW_CMD_SET_LABEL: free(op->u.label.from); free(op->u.label.to); break;
+    default: break;
+  }
+}
+static void flow__cmd_free(struct flow__cmd *c) {
+  for (int i = 0; i < c->nops; i++) flow__op_free(&c->ops[i]);
+  free(c->ops);
+}
+static void flow__redo_clear(flow_t *f) {
+  for (int i = 0; i < f->journal.rn; i++) flow__cmd_free(&f->journal.redo[i]);
+  f->journal.rn = 0;
+}
+/* full teardown: flow_free + flow_load's flow__graph_reset (serialize seam — undo must
+   not invert against a replaced graph) */
+static void flow__journal_clear(flow_t *f) {
+  for (int i = 0; i < f->journal.n; i++) flow__cmd_free(&f->journal.items[i]);
+  free(f->journal.items); f->journal.items = NULL; f->journal.n = f->journal.cap = 0;
+  flow__redo_clear(f);
+  free(f->journal.redo); f->journal.redo = NULL; f->journal.rcap = 0;
+  f->journal.txn_depth = 0; f->journal.txn_base = -1;
+}
+static int flow__rec_gate(flow_t *f) {             /* every record call is gated on this */
+  return !f->journal.applying && !f->journal.suppress && f->journal.limit != 0;
+}
+/* push one op: append to the open transaction's command, else push a new single-op
+   command (evicting the oldest past the cap). Any recorded mutation clears redo. */
+static void flow__rec_push(flow_t *f, flow__op op) {
+  flow__redo_clear(f);
+  struct flow__cmd *c;
+  if (f->journal.txn_depth > 0 && f->journal.txn_base >= 0) {
+    c = &f->journal.items[f->journal.txn_base];    /* txn already open: coalesce into its command */
+  } else {
+    while (f->journal.n >= f->journal.limit && f->journal.n > 0) {  /* evict oldest STEP(s): a lowered
+                                                       limit + redo-restores can leave n past the cap */
+      flow__cmd_free(&f->journal.items[0]);
+      memmove(&f->journal.items[0], &f->journal.items[1],
+              (size_t)(f->journal.n - 1) * sizeof *f->journal.items);
+      f->journal.n--;
+    }
+    f->journal.items = (struct flow__cmd*)flow__grow(f->journal.items, &f->journal.cap,
+                                                     f->journal.n + 1, sizeof *f->journal.items);
+    c = &f->journal.items[f->journal.n++];
+    memset(c, 0, sizeof *c);
+    if (f->journal.txn_depth > 0) f->journal.txn_base = f->journal.n - 1;  /* first record opens the txn's command */
+  }
+  c->ops = (flow__op*)flow__grow(c->ops, &c->opcap, c->nops + 1, sizeof *c->ops);
+  c->ops[c->nops++] = op;
+}
+void flow__undo_begin(flow_t *f) {
+  if (f->journal.applying) return;                 /* replay never opens transactions */
+  if (f->journal.txn_depth++ == 0) f->journal.txn_base = -1;  /* command opens lazily on first record */
+}
+void flow__undo_end(flow_t *f) {
+  if (f->journal.applying) return;
+  if (f->journal.txn_depth > 0 && --f->journal.txn_depth == 0) f->journal.txn_base = -1;
+}
+static flow__op flow__op_base(flow_t *f, flow_cmd_kind kind) {
+  flow__op op; memset(&op, 0, sizeof op);
+  op.kind = kind;
+  op.nid0 = op.nid1 = f->nextid; op.eid0 = op.eid1 = f->nexteid;
+  return op;
+}
+static void flow__rec_add_node(flow_t *f, int id) {  /* call AFTER the add (id minted, node appended) */
+  flow__op op = flow__op_base(f, FLOW_CMD_ADD_NODE);
+  op.nid0 = id;                                      /* undo rewinds the counter to the pre-add value */
+  op.u.node.snap.id = id; op.u.node.snap.index = f->nnodes - 1;  /* struct snapped at undo time */
+  flow__rec_push(f, op);
+}
+static void flow__rec_add_edge(flow_t *f, int id) {
+  flow__op op = flow__op_base(f, FLOW_CMD_ADD_EDGE);
+  op.eid0 = id;
+  op.u.edge.snap.id = id; op.u.edge.snap.index = f->nedges - 1;
+  flow__rec_push(f, op);
+}
+static void flow__rec_move(flow_t *f, int id, flow_pt from_abs, flow_pt to_abs) {
+  if (f->journal.txn_depth > 0 && f->journal.txn_base >= 0) {  /* coalesce within the open txn */
+    struct flow__cmd *c = &f->journal.items[f->journal.txn_base];
+    for (int i = 0; i < c->nops; i++)
+      if (c->ops[i].kind == FLOW_CMD_MOVE_NODE && c->ops[i].u.move.id == id) {
+        c->ops[i].u.move.to = to_abs;                /* keep the first `from`, overwrite `to` */
+        return;
+      }
+  }
+  flow__op op = flow__op_base(f, FLOW_CMD_MOVE_NODE);
+  op.u.move.id = id; op.u.move.from = from_abs; op.u.move.to = to_abs;
+  flow__rec_push(f, op);
+}
+static void flow__rec_remove_edge(flow_t *f, const flow_edge *e, int index) {
+  flow__op op = flow__op_base(f, FLOW_CMD_REMOVE_EDGE);
+  op.u.edge.snap.id = e->id; op.u.edge.snap.index = index;
+  op.u.edge.snap.edge = *e;
+  op.u.edge.snap.label_copy = flow__dup(e->label);
+  op.u.edge.snap.edge.label = op.u.edge.snap.label_copy;
+  flow__rec_push(f, op);
+}
+/* subtree snapshot BEFORE flow_remove_node's cascade: every node in the parent-chain
+   subtree of `id` plus every edge incident to any of them, in ascending array order
+   (so undo's positional re-inserts rebuild the original insertion order). */
+static void flow__rec_remove_node(flow_t *f, int id) {
+  flow__op op = flow__op_base(f, FLOW_CMD_REMOVE_NODE);
+  op.u.subtree.root = id;
+  int nn = 0, ne = 0;
+  for (int i = 0; i < f->nnodes; i++) if (flow_is_ancestor(f, id, f->nodes[i].id)) nn++;
+  for (int i = 0; i < f->nedges; i++)
+    if (flow_is_ancestor(f, id, f->edges[i].source) || flow_is_ancestor(f, id, f->edges[i].target)) ne++;
+  op.u.subtree.nodes = nn ? (flow__node_snap*)malloc((size_t)nn * sizeof(flow__node_snap)) : NULL;
+  op.u.subtree.edges = ne ? (flow__edge_snap*)malloc((size_t)ne * sizeof(flow__edge_snap)) : NULL;
+  for (int i = 0; i < f->nnodes; i++) {
+    if (!flow_is_ancestor(f, id, f->nodes[i].id)) continue;
+    flow__node_snap *s = &op.u.subtree.nodes[op.u.subtree.nn++];
+    s->id = f->nodes[i].id; s->index = i; s->node = f->nodes[i];   /* data ptr BORROWED */
+  }
+  for (int i = 0; i < f->nedges; i++) {
+    if (!flow_is_ancestor(f, id, f->edges[i].source) && !flow_is_ancestor(f, id, f->edges[i].target)) continue;
+    flow__edge_snap *s = &op.u.subtree.edges[op.u.subtree.ne++];
+    s->id = f->edges[i].id; s->index = i; s->edge = f->edges[i];
+    s->label_copy = flow__dup(f->edges[i].label);                  /* label OWNED: dup it */
+    s->edge.label = s->label_copy;
+  }
+  flow__rec_push(f, op);
+}
+static void flow__rec_reconnect(flow_t *f, int edge, int which, int from_node, const char *from_handle,
+                                int to_node, const char *to_handle) {
+  flow__op op = flow__op_base(f, FLOW_CMD_RECONNECT_EDGE);
+  op.u.reconnect.id = edge; op.u.reconnect.which = which;
+  op.u.reconnect.from_node = from_node; op.u.reconnect.to_node = to_node;
+  snprintf(op.u.reconnect.from_handle, sizeof op.u.reconnect.from_handle, "%s", from_handle ? from_handle : "");
+  snprintf(op.u.reconnect.to_handle, sizeof op.u.reconnect.to_handle, "%s", to_handle ? to_handle : "");
+  flow__rec_push(f, op);
+}
+static void flow__rec_set_label(flow_t *f, int edge, const char *from, const char *to) {
+  flow__op op = flow__op_base(f, FLOW_CMD_SET_LABEL);
+  op.u.label.id = edge;
+  op.u.label.from = flow__dup(from);                 /* dup'd BEFORE the mutator frees the old label */
+  op.u.label.to = flow__dup(to);
+  flow__rec_push(f, op);
+}
+static void flow__rec_reparent(flow_t *f, int child, int from_parent, flow_pt from_pos,
+                               int to_parent, flow_pt to_pos) {
+  flow__op op = flow__op_base(f, FLOW_CMD_REPARENT);
+  op.u.reparent.child = child;
+  op.u.reparent.from_parent = from_parent; op.u.reparent.from_pos = from_pos;
+  op.u.reparent.to_parent = to_parent; op.u.reparent.to_pos = to_pos;
+  flow__rec_push(f, op);
 }
 flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
@@ -179,20 +401,23 @@ flow_t *flow_new(int cols, int rows) {
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
   f->reconnect_edge = -1; f->last_click_node = -1;
   f->autopan_margin = 3; f->autopan_speed = 2;
+  f->journal.limit = 128; f->journal.txn_base = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
 void flow_free(flow_t *f) {
   if (!f) return;
+  flow__journal_clear(f);   /* frees command label copies + stacks; drops (never frees) node->data */
   for (int i = 0; i < f->nedges; i++) free(f->edges[i].label);
   free(f->nodes); free(f->edges); free(f->ntypes); free(f->etypes); free(f->front); free(f);
 }
 /* Tear the graph back to empty for flow_load: free edge labels + node/edge arrays,
    NULL the pointers, zero counts/caps, reset id counters. Leaves view/types/cb/widgets
    intact. NEVER frees node->data (app owns it; same contract as flow_free).
-   NOTE (serialize×undo seam): when undo lands, this must also clear the undo journal,
-   else undo inverts against a replaced graph. */
+   Also clears the undo journal (serialize×undo seam): undo must not invert against a
+   replaced graph; flow_load additionally suppresses recording across its rebuild. */
 static void flow__graph_reset(flow_t *f) {
+  flow__journal_clear(f);
   for (int i = 0; i < f->nedges; i++) free(f->edges[i].label);
   free(f->nodes); free(f->edges);
   f->nodes = NULL; f->edges = NULL;
@@ -230,7 +455,9 @@ int flow_add_node(flow_t *f, const char *type, flow_pt pos, void *data) {
   flow_node *n = &f->nodes[f->nnodes++]; memset(n, 0, sizeof *n);
   n->id = f->nextid++; snprintf(n->type, sizeof n->type, "%s", type ? type : "default");
   n->pos = pos; n->parent = -1; n->data = data; flow_measure_node(f, n);
-  return n->id;
+  int nid = n->id;
+  if (flow__rec_gate(f)) flow__rec_add_node(f, nid);
+  return nid;
 }
 void flow_move_node(flow_t *f, int id, flow_pt pos) {
   /* ABSOLUTE-in contract: `pos` is a world-absolute target. Store it parent-relative so
@@ -238,6 +465,7 @@ void flow_move_node(flow_t *f, int id, flow_pt pos) {
      so n->pos == pos — byte-identical to the pre-groups behaviour for every existing caller. */
   flow_node *n = flow_get_node(f, id);
   if (!n) return;
+  if (flow__rec_gate(f)) flow__rec_move(f, id, flow_node_abs(f, n), pos);  /* MOVE journals ABSOLUTE coords */
   flow_pt pa = { 0, 0 };
   if (n->parent != -1) { flow_node *p = flow_get_node(f, n->parent); if (p) pa = flow_node_abs(f, p); }
   n->pos.x = pos.x - pa.x; n->pos.y = pos.y - pa.y;
@@ -269,6 +497,9 @@ void flow_set_parent(flow_t *f, int child, int parent) {
   flow_pt cabs = flow_node_abs(f, c);
   flow_pt pabs = { 0, 0 };
   if (parent != -1) { flow_node *p = flow_get_node(f, parent); pabs = flow_node_abs(f, p); }
+  if (flow__rec_gate(f) && c->parent != parent)              /* same-parent call mutates nothing: skip */
+    flow__rec_reparent(f, child, c->parent, c->pos, parent,
+                       (flow_pt){ cabs.x - pabs.x, cabs.y - pabs.y });
   c->parent = parent;
   c->pos.x = cabs.x - pabs.x; c->pos.y = cabs.y - pabs.y;   /* abs preserved across the move */
 }
@@ -282,20 +513,23 @@ int flow_group(flow_t *f, const int *ids, int n) {
     bb = have ? flow_rect_union(bb, mr) : mr; have = 1;
   }
   if (!have) return -1;
+  flow__undo_begin(f);                                /* add + N reparents = ONE undo step */
   const int pad = 1;
   flow_pt gpos = { bb.x - pad, bb.y - pad };
   int gw = bb.w + 2 * pad, gh = bb.h + 2 * pad;
   int gid = flow_add_node(f, "group", gpos, NULL);   /* measure is a no-op write-back; w/h set next */
   flow_node *g = flow_get_node(f, gid);              /* re-fetch: array may have realloc'd */
-  if (g) { g->w = gw; g->h = gh; }
+  if (g) { g->w = gw; g->h = gh; }                   /* direct write: captured by the ADD snap at undo time */
   for (int i = 0; i < n; i++) {                       /* reparent members (abs preserved) */
     if (flow_get_node(f, ids[i])) flow_set_parent(f, ids[i], gid);
   }
+  flow__undo_end(f);
   return gid;
 }
 void flow_ungroup(flow_t *f, int id) {
   flow_node *g = flow_get_node(f, id);
   if (!g || strcmp(g->type, "group") != 0) return;   /* no-op if missing or not a group */
+  flow__undo_begin(f);                                /* N reparents-out + container remove = ONE undo step */
   int gparent = g->parent;
   for (;;) {                                          /* reparent each direct child OUT (abs preserved) */
     int childid = -1;
@@ -303,7 +537,8 @@ void flow_ungroup(flow_t *f, int id) {
     if (childid == -1) break;
     flow_set_parent(f, childid, gparent);             /* re-find by id each step (array stable here, but safe) */
   }
-  flow_remove_node(f, id);                             /* now childless: removes only the container */
+  flow_remove_node(f, id);                             /* now childless: its subtree snap is the container alone */
+  flow__undo_end(f);
 }
 int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   if (src == dst) return -1;
@@ -317,7 +552,9 @@ int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   e->id = f->nexteid++; e->source = src; e->target = dst;
   snprintf(e->source_handle, sizeof e->source_handle, "%s", sh ? sh : "");
   snprintf(e->target_handle, sizeof e->target_handle, "%s", th ? th : "");
-  return e->id;
+  int eid = e->id;
+  if (flow__rec_gate(f)) flow__rec_add_edge(f, eid);  /* records on success only (rejects returned above) */
+  return eid;
 }
 flow_node *flow_get_node(flow_t *f, int id) { for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].id == id) return &f->nodes[i]; return NULL; }
 flow_edge *flow_get_edge(flow_t *f, int id) { for (int i = 0; i < f->nedges; i++) if (f->edges[i].id == id) return &f->edges[i]; return NULL; }
@@ -514,6 +751,11 @@ void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *han
         strcmp(f->edges[i].source_handle, nsh) == 0 &&
         strcmp(f->edges[i].target_handle, nth) == 0) return;
   }
+  if (flow__rec_gate(f))                /* validated: record old endpoint+handle BEFORE the commit */
+    flow__rec_reconnect(f, edge, which,
+                        which == 0 ? e->source : e->target,
+                        which == 0 ? e->source_handle : e->target_handle,
+                        endpoint_node, hs);
   e->source = nsrc; e->target = ntgt;   /* scalar self-assign on the unchanged side is harmless */
   /* write ONLY the changed endpoint's handle, from the caller arg `hs` (never aliases
      e's buffers). Rewriting the unchanged side from e->*_handle would be a self-overlapping
@@ -523,6 +765,7 @@ void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *han
 }
 void flow_set_edge_label(flow_t *f, int edge, const char *label) {
   flow_edge *e = flow_get_edge(f, edge); if (!e) return;
+  if (flow__rec_gate(f)) flow__rec_set_label(f, edge, e->label, label);  /* dup the OLD label BEFORE freeing it */
   free(e->label); e->label = NULL;
   if (label) {                                                 /* malloc+memcpy (avoid strdup decl issues under -std=c11) */
     size_t n = strlen(label) + 1;
@@ -533,6 +776,7 @@ void flow_set_edge_label(flow_t *f, int edge, const char *label) {
 void flow_remove_edge(flow_t *f, int id) {
   for (int i = 0; i < f->nedges; i++) {
     if (f->edges[i].id != id) continue;
+    if (flow__rec_gate(f)) flow__rec_remove_edge(f, &f->edges[i], i);  /* snapshot (dup'd label) before freeing */
     free(f->edges[i].label);                                  /* free-then-shift: no leak, no dbl-free */
     memmove(&f->edges[i], &f->edges[i+1], (size_t)(f->nedges - i - 1) * sizeof(flow_edge));
     f->nedges--;                                              /* preserve insertion order */
@@ -547,6 +791,10 @@ void flow_remove_node(flow_t *f, int id) {
      suppressed so they never refire. */
   int top = (f->cb_suppress == 0);
   unsigned long sig = 0;
+  /* journal the WHOLE subtree as ONE command BEFORE callback + cascade (state at API-call
+     time); the recursive child removals below run with journal.suppress set so the
+     inlined cascade never records piecemeal. */
+  if (flow__rec_gate(f) && flow_get_node(f, id)) flow__rec_remove_node(f, id);
   if (top) {
     sig = flow__sel_sig(f);
     if (f->cb.on_nodes_delete) {
@@ -557,7 +805,7 @@ void flow_remove_node(flow_t *f, int id) {
       free(ids);
     }
   }
-  f->cb_suppress++;
+  f->cb_suppress++; f->journal.suppress++;
   /* never hold a node/edge pointer across mutation: re-find by id each step (array moves). */
   for (;;) {                                                  /* recursively remove child nodes first */
     int childid = -1;
@@ -578,7 +826,7 @@ void flow_remove_node(flow_t *f, int id) {
     f->nnodes--;
     break;                                                    /* break (not return) so cleanup below runs */
   }
-  f->cb_suppress--;
+  f->cb_suppress--; f->journal.suppress--;
   if (top) flow__notify_selection(f, sig);                    /* selection shrank if a selected node vanished */
 }
 void flow_delete_selection(flow_t *f) {
@@ -594,17 +842,21 @@ void flow_delete_selection(flow_t *f) {
     if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
     free(ids);
   }
+  flow__undo_begin(f);  /* every removed root's subtree command coalesces into ONE undo step */
   f->cb_suppress++;
   for (;;) { int id = flow_selected_node(f); if (id < 0) break; flow_remove_node(f, id); }
   for (;;) { int e  = flow_selected_edge(f); if (e  < 0) break; flow_remove_edge(f, e);  }
   f->cb_suppress--;
+  flow__undo_end(f);
   flow__notify_selection(f, sig);
 }
 int flow_add_node_center(flow_t *f, const char *type, void *data) {
+  flow__undo_begin(f);                                        /* add + centering move = ONE undo step */
   flow_pt c = flow_to_world(f, (flow_pt){ f->cols / 2, f->rows / 2 });
   int id = flow_add_node(f, type, c, data);
   flow_node *n = flow_get_node(f, id);                        /* re-fetch for measured w,h */
   if (n) flow_move_node(f, id, (flow_pt){ c.x - n->w / 2, c.y - n->h / 2 });
+  flow__undo_end(f);
   return id;
 }
 void flow_fit_view(flow_t *f, int margin) {
@@ -652,6 +904,8 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (seq[0] == 'f') { flow_fit_view(f, 2); return 1; }
   if (seq[0] == '?') { flow_set_statusbar(f, !f->statusbar); return 1; }
   if (seq[0] == ' ') { f->space_held = !f->space_held; return 1; }  /* space-pan: sticky toggle (no key-up in a TTY) */
+  if (seq[0] == 'u') { flow_undo(f); return 1; }                    /* declared above, defined in flow_undo.h (same TU) */
+  if (seq[0] == '\x12') { flow_redo(f); return 1; }                 /* Ctrl-r: single byte, longest-match safe */
   /* (3) unhandled: q, bare arrows, anything else */
   return 0;
 }
@@ -757,8 +1011,10 @@ int flow_end_connection(flow_t *f, int node, const char *handle) {
     for (int j = 0; j < hc; j++) { const flow_handle *h = flow_node_handle_at(f, node, j);
       if (h && (h->kind == FLOW_HANDLE_TARGET || h->kind == FLOW_HANDLE_BOTH)) { th = h->id; break; } }
   }
+  flow__undo_begin(f);                            /* connect (incl. any on_connect follow-ups) = ONE undo step */
   int eid = flow_add_edge(f, src, node, sh, th);
   if (eid != -1 && f->cb.on_connect) f->cb.on_connect(f, src, node, f->cb.user);
+  flow__undo_end(f);
   return eid;
 }
 void flow_cancel_connection(flow_t *f) {

@@ -295,8 +295,11 @@ int flow_load(flow_t *f, const char *path) {
   /* (2) validate structure BEFORE touching f — malformed => -1, graph untouched. */
   if (!flow__json_valid(root, end)) { free(buf); return -1; }
 
-  /* (3) only now wipe the graph and rebuild. */
+  /* (3) only now wipe the graph and rebuild. flow__graph_reset clears the undo journal
+     (undo must not invert against a replaced graph) and the rebuild below runs with
+     recording suppressed — a load is not an edit, so it journals NOTHING. */
   flow__graph_reset(f);
+  f->journal.suppress++;
 
   /* viewport (floats; keep zmin/zmax limits from the live engine) */
   flow_json_rd vp;
@@ -384,6 +387,7 @@ int flow_load(flow_t *f, const char *path) {
   f->nextid  = maxnid + 1;                           /* post-load adds don't collide */
   f->nexteid = maxeid + 1;
 
+  f->journal.suppress--;
   free(buf);
   return 0;
 }
