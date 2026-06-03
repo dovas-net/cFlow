@@ -325,6 +325,7 @@ struct flow {
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
   int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
+  int autopan_margin, autopan_speed;                           /* auto-pan near edge during object drags (node/connect/reconnect): band width (cells) + step per motion event; defaults 3/2 in flow_new */
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
@@ -348,6 +349,7 @@ flow_t *flow_new(int cols, int rows) {
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
   f->reconnect_edge = -1; f->last_click_node = -1;
+  f->autopan_margin = 3; f->autopan_speed = 2;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
@@ -1852,6 +1854,20 @@ static void flow__resolve_connection_at(flow_t *f, flow_pt scr) {
     flow_cancel_connection(f);             /* dropped on empty pane or the source */
   }
 }
+/* event-driven auto-pan (spec §8, model A): ONE autopan_speed step per motion event
+   while an OBJECT drag (node / connection / reconnect) has the cursor within
+   autopan_margin cells of a buffer edge, panning toward that edge so off-screen
+   targets scroll into reach. A terminal delivers no events for a stationary cursor,
+   so this only advances while the mouse keeps moving (the run-loop-ticked model is a
+   documented follow-up). Callers gate: pane-pan and marquee drags never auto-pan.
+   An axis whose margin bands would overlap (2*margin >= extent) is skipped — defense
+   for tiny buffers, where "near the edge" loses meaning. */
+static void flow__autopan(flow_t *f, flow_pt scr) {
+  int m = f->autopan_margin, s = f->autopan_speed, dx = 0, dy = 0;
+  if (2 * m < f->cols) { if (scr.x < m) dx = s; else if (scr.x >= f->cols - m) dx = -s; }
+  if (2 * m < f->rows) { if (scr.y < m) dy = s; else if (scr.y >= f->rows - m) dy = -s; }
+  if (dx || dy) flow_pan(f, dx, dy);
+}
 void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
   if (ev->type == FLOW_MOUSE_WHEEL) {
     if (ev->mods & FLOW_MOD_CTRL) {           /* Ctrl+wheel: pointer-centered zoom (button 0=in,1=out) */
@@ -1939,11 +1955,17 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
   } else if (ev->type == FLOW_MOUSE_MOTION) {
     if (f->conn_active) {                         /* drag-connect: track free end + reveal candidate */
       if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
+      /* auto-pan BEFORE the update so the drop-candidate reveal hit-tests the post-pan
+         view (conn_end is screen coords — the pan never moves it). Deliberately fires
+         on connectOnClick HOVER too (conn_active with no button down): the connection
+         is in flight either way, and the edge is what makes off-screen targets reachable. */
+      flow__autopan(f, scr);
       flow_update_connection(f, scr);
       return;
     }
     if (f->reconnect_edge != -1) {                /* reconnect drag: just track movement, no pan/drag */
       if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
+      flow__autopan(f, scr);                      /* nothing to re-place: release hit-tests at the cursor */
       return;
     }
     if (!f->mouse_down) return;
@@ -1970,6 +1992,9 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
                        (wa.y < wc.y ? wc.y - wa.y : wa.y - wc.y) };
       flow_select_in_rect(f, wr, f->marquee_mode, 0);
     } else if (f->drag_node != -1) {
+      /* pan FIRST, then place at the post-pan world(cursor): the node stays under the
+         cursor as the view scrolls (place-then-pan would make it visually drift). */
+      flow__autopan(f, scr);
       if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift the set by per-motion world delta */
         flow_pt w = flow_to_world(f, scr);
         int dx = w.x - f->drag_last_world.x, dy = w.y - f->drag_last_world.y;
