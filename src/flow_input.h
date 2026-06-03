@@ -75,6 +75,12 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       /* connectOnClick resolve: a press while already connecting (armed by a prior
          click) completes on a target handle/node, else cancels. Never arms drag. */
       if (f->conn_active) { flow__resolve_connection_at(f, scr); return; }
+      if (f->space_held) {                       /* space-pan: force drag-to-pan, over a node OR the pane */
+        f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+        f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+        f->down_modsel = 0; f->marquee_active = 0;
+        return;                                  /* first motion arms the existing dragging_pan path */
+      }
       f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
       /* HIT PRECEDENCE (trio invariant): handle -> node-body -> pane. A later edge
          package inserts an edge-endpoint test BETWEEN handle and node-body here.
@@ -213,7 +219,11 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       return;
     }
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
-      if (f->down_modsel) {
+      if (f->space_held) {
+        /* space-pan click with no motion: a grab without a move. Do NOT clear the
+           selection, fire on_pane_click, or select an edge — the cursor may be over a
+           node body, so reporting a pane/edge click would violate the callback contract. */
+      } else if (f->down_modsel) {
         /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
         f->last_click_node = -1;                 /* a modifier-click breaks any double-click pair */
       } else if (f->down_node != -1) {

@@ -153,6 +153,7 @@ struct flow {
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
+  int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
@@ -648,6 +649,7 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (seq[0] == 'n') { flow_add_node_center(f, "default", (void*)"node"); return 1; }    /* static label */
   if (seq[0] == 'f') { flow_fit_view(f, 2); return 1; }
   if (seq[0] == '?') { flow_set_statusbar(f, !f->statusbar); return 1; }
+  if (seq[0] == ' ') { f->space_held = !f->space_held; return 1; }  /* space-pan: sticky toggle (no key-up in a TTY) */
   /* (3) unhandled: q, bare arrows, anything else */
   return 0;
 }

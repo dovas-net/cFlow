@@ -324,6 +324,7 @@ struct flow {
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
+  int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
@@ -819,6 +820,7 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (seq[0] == 'n') { flow_add_node_center(f, "default", (void*)"node"); return 1; }    /* static label */
   if (seq[0] == 'f') { flow_fit_view(f, 2); return 1; }
   if (seq[0] == '?') { flow_set_statusbar(f, !f->statusbar); return 1; }
+  if (seq[0] == ' ') { f->space_held = !f->space_held; return 1; }  /* space-pan: sticky toggle (no key-up in a TTY) */
   /* (3) unhandled: q, bare arrows, anything else */
   return 0;
 }
@@ -1878,6 +1880,12 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       /* connectOnClick resolve: a press while already connecting (armed by a prior
          click) completes on a target handle/node, else cancels. Never arms drag. */
       if (f->conn_active) { flow__resolve_connection_at(f, scr); return; }
+      if (f->space_held) {                       /* space-pan: force drag-to-pan, over a node OR the pane */
+        f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+        f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+        f->down_modsel = 0; f->marquee_active = 0;
+        return;                                  /* first motion arms the existing dragging_pan path */
+      }
       f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
       /* HIT PRECEDENCE (trio invariant): handle -> node-body -> pane. A later edge
          package inserts an edge-endpoint test BETWEEN handle and node-body here.
@@ -2016,7 +2024,11 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       return;
     }
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
-      if (f->down_modsel) {
+      if (f->space_held) {
+        /* space-pan click with no motion: a grab without a move. Do NOT clear the
+           selection, fire on_pane_click, or select an edge — the cursor may be over a
+           node body, so reporting a pane/edge click would violate the callback contract. */
+      } else if (f->down_modsel) {
         /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
         f->last_click_node = -1;                 /* a modifier-click breaks any double-click pair */
       } else if (f->down_node != -1) {
