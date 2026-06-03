@@ -85,6 +85,25 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           return;
         }
       }
+      /* edge-endpoint test (BETWEEN handle and node-body): if the press lands EXACTLY on
+         an endpoint cell of the topmost edge under the cursor, arm a reconnect drag and
+         skip node-drag/select. Endpoints sit one cell OUTSIDE the node so this never
+         steals an ordinary node-body press (require exact cell, not just within tol). */
+      int eedge = flow_hit_edge(f, scr, 1);
+      if (eedge != -1) {
+        flow_pt ss, ts;
+        int oks = flow_edge_endpoint_screen(f, flow_get_edge(f, eedge), 0, &ss);
+        int okt = flow_edge_endpoint_screen(f, flow_get_edge(f, eedge), 1, &ts);
+        int which = -1;
+        if (okt && ts.x == scr.x && ts.y == scr.y) which = 1;        /* target endpoint */
+        else if (oks && ss.x == scr.x && ss.y == scr.y) which = 0;   /* source endpoint */
+        if (which != -1) {
+          f->reconnect_edge = eedge; f->reconnect_which = which;
+          f->mouse_down = 1; f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+          f->down_modsel = 0; f->marquee_active = 0;
+          return;
+        }
+      }
       f->down_node = flow_hit_node(f, scr);
       f->drag_node = -1; f->dragging_pan = 0;
       f->down_modsel = 0; f->marquee_active = 0;
@@ -104,6 +123,10 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (f->conn_active) {                         /* drag-connect: track free end + reveal candidate */
       if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
       flow_update_connection(f, scr);
+      return;
+    }
+    if (f->reconnect_edge != -1) {                /* reconnect drag: just track movement, no pan/drag */
+      if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
       return;
     }
     if (!f->mouse_down) return;
@@ -156,6 +179,18 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       /* else: the click that BEGAN the connection — stay armed for connectOnClick */
       return;
     }
+    if (f->reconnect_edge != -1) {               /* finish an endpoint-reconnect drag */
+      if (f->moved) {                            /* dragged: repoint onto a valid node, else leave unchanged */
+        int hit = flow_hit_node(f, scr);
+        if (hit != -1) flow_reconnect_edge(f, f->reconnect_edge, hit, "", f->reconnect_which);
+      } else {                                   /* click on the endpoint, no drag: select the edge */
+        flow_select_edge(f, f->reconnect_edge, 0);
+      }
+      f->reconnect_edge = -1; f->mouse_down = 0; f->moved = 0; f->down_node = -1;
+      f->drag_node = -1; f->dragging_pan = 0; f->down_modsel = 0;
+      f->marquee_active = 0; f->marquee_on = 0;
+      return;
+    }
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
       if (f->down_modsel) {
         /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
@@ -163,8 +198,13 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         flow_select_node(f, f->down_node, 0);
         if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
       } else {
-        flow_clear_selection(f);
-        if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
+        int eclick = flow_hit_edge(f, scr, 1);   /* edge-body click-select before clearing/pane-click */
+        if (eclick != -1) {
+          flow_select_edge(f, eclick, 0);
+        } else {
+          flow_clear_selection(f);
+          if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
+        }
       }
     }
     /* marquee finalize: selection already applied during motion; just clear state.

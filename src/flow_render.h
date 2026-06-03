@@ -91,6 +91,51 @@ static const flow_handle *flow__edge_handle(flow_t *f, flow_node *n, const char 
   }
   return flow_node_handle_at(f, n->id, 0);                   /* fall back to first */
 }
+/* Screen endpoints + facings for an edge, matching EXACTLY what flow_render draws:
+   declared-handle anchor -> outward nudge -> flow_to_screen. The render edge loop,
+   flow_hit_edge and flow_edge_endpoint_screen all go through this so hit-test and
+   render can never drift (the zoom package makes this helper zoom-aware in ONE place).
+   Returns 0 if either node is missing. */
+static int flow__edge_screen_ends(flow_t *f, flow_edge *e, flow_pt *ss, flow_pos *sp, flow_pt *ts, flow_pos *tp) {
+  flow_node *sn = flow_get_node(f, e->source), *tn = flow_get_node(f, e->target);
+  if (!sn || !tn) return 0;
+  const flow_handle *sh = flow__edge_handle(f, sn, e->source_handle, 1);
+  const flow_handle *th = flow__edge_handle(f, tn, e->target_handle, 0);
+  flow_pos lsp = sh ? sh->pos : FLOW_RIGHT, ltp = th ? th->pos : FLOW_LEFT;
+  flow_pt sa = flow__anchor_outward(flow_handle_anchor(f, sn, sh), lsp);
+  flow_pt ta = flow__anchor_outward(flow_handle_anchor(f, tn, th), ltp);
+  if (ss) *ss = flow_to_screen(f, sa);
+  if (ts) *ts = flow_to_screen(f, ta);
+  if (sp) *sp = lsp;
+  if (tp) *tp = ltp;
+  return 1;
+}
+int flow_edge_endpoint_screen(flow_t *f, const flow_edge *e, int which, flow_pt *out) {
+  flow_pt ss, ts;
+  if (!flow__edge_screen_ends(f, (flow_edge*)e, &ss, NULL, &ts, NULL)) return 0;  /* cast: helper takes non-const */
+  if (out) *out = which == 0 ? ss : ts;
+  return 1;
+}
+int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
+  for (int i = flow_edge_count(f) - 1; i >= 0; i--) {         /* topmost first (reverse, like flow_hit_node) */
+    flow_edge *e = &flow_edges(f)[i];
+    flow_pt ss, ts; flow_pos sp, tp;
+    if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
+    const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
+    if (!et) et = &flow_default_edge_type;
+    flow_route rt = {0};
+    et->route(ss, sp, ts, tp, &rt);
+    int hit = 0;
+    for (int c = 0; c < rt.count; c++) {
+      int dx = rt.cells[c].x - screen.x, dy = rt.cells[c].y - screen.y;
+      if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
+      if ((dx > dy ? dx : dy) <= tol) { hit = 1; break; }     /* Chebyshev distance */
+    }
+    free(rt.cells);
+    if (hit) return e->id;
+  }
+  return -1;
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
@@ -98,26 +143,24 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   /* background grid first (under edges/nodes, so it scrolls with pan) */
   if (f->bg.variant != FLOW_BG_NONE) flow__background(f, &cb);
 
-  /* edges first (drawn under nodes) */
+  /* edges first (drawn under nodes). Endpoints/facings via the shared helper so the
+     hit-test (flow_hit_edge) and this draw can never drift apart. */
   for (int i = 0; i < flow_edge_count(f); i++) {
     flow_edge *e = &flow_edges(f)[i];
-    flow_node *sn = flow_get_node(f, e->source), *tn = flow_get_node(f, e->target);
-    if (!sn || !tn) continue;
-    /* anchor on declared handles (named -> nearest source/target -> RIGHT/LEFT default) */
-    const flow_handle *sh = flow__edge_handle(f, sn, e->source_handle, 1);
-    const flow_handle *th = flow__edge_handle(f, tn, e->target_handle, 0);
-    flow_pos sp = sh ? sh->pos : FLOW_RIGHT, tp = th ? th->pos : FLOW_LEFT;
-    flow_pt sa = flow_handle_anchor(f, sn, sh), ta = flow_handle_anchor(f, tn, th);
-    /* route from one cell OUTSIDE each border (along the handle facing) so the
-       router's arrowhead lands clear of the node box (edges draw under nodes). */
-    sa = flow__anchor_outward(sa, sp); ta = flow__anchor_outward(ta, tp);
-    flow_pt ss = flow_to_screen(f, sa), ts = flow_to_screen(f, ta);
+    flow_pt ss, ts; flow_pos sp, tp;
+    if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
     if (!et) et = &flow_default_edge_type;
     flow_route rt = {0};
     et->route(ss, sp, ts, tp, &rt);
+    uint8_t attr = (e->flags & FLOW_SELECTED) ? FLOW_BOLD : 0;  /* selected edge: bold path */
     for (int c = 0; c < rt.count; c++)
-      flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, 0);
+      flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, attr);
+    if (e->label) {                                            /* label on top of the path at the router anchor (screen coords), clipped */
+      const char *u = e->label; int gx = rt.label_anchor.x;
+      while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n;
+        flow_cellbuf_put(&cb, gx++, rt.label_anchor.y, cp, FLOW_FG, FLOW_BG, attr); }
+    }
     free(rt.cells);
   }
 

@@ -66,6 +66,7 @@ void flow_toggle_node(flow_t *f, int id);   /* add to selection if unset, remove
 void flow_clear_selection(flow_t *f);
 int  flow_selected_node(flow_t *f);   /* first selected node id, or -1 */
 int  flow_selected_edge(flow_t *f);   /* first selected edge id, or -1 */
+void flow_select_edge(flow_t *f, int id, int additive);  /* set FLOW_SELECTED on the edge; !additive clears node + other edge selection first (mutual exclusivity) */
 int  flow_selected_count(flow_t *f);  /* number of FLOW_SELECTED nodes */
 int  flow_selected_nodes(flow_t *f, int *out, int max);  /* fill out[] with selected ids in insertion order; returns total count (may exceed max) */
 int  flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int additive);  /* select nodes contained (FULL) or intersecting (PARTIAL) the world rect; !additive clears first; returns count selected */
@@ -74,6 +75,14 @@ void flow_set_marquee_mode(flow_t *f, flow_select_mode mode);  /* default mode f
 /* mutators (callers re-fetch node/edge pointers after these — array may move) */
 void flow_remove_node(flow_t *f, int id);  /* cascades incident edges AND child nodes (recursive), frees edge labels */
 void flow_remove_edge(flow_t *f, int id);  /* frees label; no-op if id absent */
+void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *handle, int which); /* which: 0=source,1=target; repoint that endpoint; revalidated like flow_add_edge (rejects self + duplicate (source,target,handles)); edge left unchanged on rejection */
+void flow_set_edge_label(flow_t *f, int edge, const char *label); /* strdup into edge->label, freeing prior; NULL clears */
+
+/* edge hit-test & endpoints — DEFINED in flow_render.h (need the render anchor helpers).
+   flow_hit_edge: topmost edge whose routed path passes within Chebyshev tol of screen, else -1.
+   flow_edge_endpoint_screen: screen cell of source(0)/target(1) endpoint, matching flow_render EXACTLY; 1 on success. */
+int  flow_hit_edge(flow_t *f, flow_pt screen, int tol);
+int  flow_edge_endpoint_screen(flow_t *f, const flow_edge *e, int which, flow_pt *out);
 
 /* keyboard command dispatch: bindings (registry) + built-ins, driven from flow_feed */
 void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user); /* register/override; matched before built-ins, longest seq first. Up to 32 bindings, seq <=7 bytes; over-limit binds are silently ignored. */
@@ -116,6 +125,7 @@ struct flow {
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
+  int reconnect_edge, reconnect_which;                        /* in-flight endpoint-reconnect drag: edge id (-1 idle) + which endpoint (0=source,1=target) */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
   struct { flow_bg_variant variant; int gap; } bg;
@@ -131,6 +141,7 @@ flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
   f->view.zoom = 1; f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
+  f->reconnect_edge = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
@@ -222,13 +233,19 @@ flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->vi
 flow_pt flow_to_world(flow_t *f, flow_pt screen) { return flow_unproject(f->view, screen); }
 flow_viewport flow_view_get(flow_t *f) { return f->view; }
 void flow_select_node(flow_t *f, int id, int additive) {
-  if (!additive) for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
+  if (!additive) {
+    for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
+    for (int i = 0; i < f->nedges; i++) f->edges[i].flags &= ~FLOW_SELECTED;  /* mutual exclusivity: deselect any edge */
+  }
   flow_node *n = flow_get_node(f, id); if (n) n->flags |= FLOW_SELECTED;
 }
 void flow_toggle_node(flow_t *f, int id) {
   flow_node *n = flow_get_node(f, id); if (n) n->flags ^= FLOW_SELECTED;  /* never clears others */
 }
-void flow_clear_selection(flow_t *f) { for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED; }
+void flow_clear_selection(flow_t *f) {
+  for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
+  for (int i = 0; i < f->nedges; i++) f->edges[i].flags &= ~FLOW_SELECTED;  /* edges too */
+}
 int flow_selected_node(flow_t *f) { for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) return f->nodes[i].id; return -1; }
 int flow_selected_count(flow_t *f) { int c = 0; for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) c++; return c; }
 int flow_selected_nodes(flow_t *f, int *out, int max) {
@@ -264,6 +281,41 @@ void flow_set_background(flow_t *f, flow_bg_variant variant, int gap) {
 int flow_selected_edge(flow_t *f) {
   for (int i = 0; i < f->nedges; i++) if (f->edges[i].flags & FLOW_SELECTED) return f->edges[i].id;
   return -1;
+}
+void flow_select_edge(flow_t *f, int id, int additive) {
+  if (!additive) flow_clear_selection(f);  /* clears node AND other edge selection (mutual exclusivity) */
+  flow_edge *e = flow_get_edge(f, id); if (e) e->flags |= FLOW_SELECTED;
+}
+void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *handle, int which) {
+  flow_edge *e = flow_get_edge(f, edge);
+  if (!e || !flow_get_node(f, endpoint_node)) return;
+  /* compute the prospective endpoints/handles, validate, THEN commit (no rollback) */
+  int nsrc = e->source, ntgt = e->target;
+  const char *nsh = e->source_handle, *nth = e->target_handle;
+  const char *hs = handle ? handle : "";
+  if (which == 0) { nsrc = endpoint_node; nsh = hs; } else { ntgt = endpoint_node; nth = hs; }
+  if (nsrc == ntgt) return;                                    /* reject self-edge */
+  for (int i = 0; i < f->nedges; i++) {                        /* reject duplicate (skip this edge) */
+    if (f->edges[i].id == edge) continue;
+    if (f->edges[i].source == nsrc && f->edges[i].target == ntgt &&
+        strcmp(f->edges[i].source_handle, nsh) == 0 &&
+        strcmp(f->edges[i].target_handle, nth) == 0) return;
+  }
+  e->source = nsrc; e->target = ntgt;   /* scalar self-assign on the unchanged side is harmless */
+  /* write ONLY the changed endpoint's handle, from the caller arg `hs` (never aliases
+     e's buffers). Rewriting the unchanged side from e->*_handle would be a self-overlapping
+     snprintf (UB per C11 7.21.6.5), so leave it untouched. */
+  if (which == 0) snprintf(e->source_handle, sizeof e->source_handle, "%s", hs);
+  else            snprintf(e->target_handle, sizeof e->target_handle, "%s", hs);
+}
+void flow_set_edge_label(flow_t *f, int edge, const char *label) {
+  flow_edge *e = flow_get_edge(f, edge); if (!e) return;
+  free(e->label); e->label = NULL;
+  if (label) {                                                 /* malloc+memcpy (avoid strdup decl issues under -std=c11) */
+    size_t n = strlen(label) + 1;
+    e->label = (char*)malloc(n);
+    if (e->label) memcpy(e->label, label, n);
+  }
 }
 void flow_remove_edge(flow_t *f, int id) {
   for (int i = 0; i < f->nedges; i++) {

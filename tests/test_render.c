@@ -258,6 +258,47 @@ int main(void) {
     free(eb); flow_free(ef);
   }
 
+  /* edge label: a labelled A->B edge renders its label glyphs near label_anchor */
+  {
+    int lc = 24, lr = 6;
+    flow_cell *lb = (flow_cell*)malloc((size_t)lc * lr * sizeof(flow_cell));
+    flow_t *lf = flow_new(lc, lr); flow_register_defaults(lf);
+    int a = flow_add_node(lf, "default", (flow_pt){0, 1}, (void*)"A");
+    int b = flow_add_node(lf, "default", (flow_pt){14, 1}, (void*)"B");
+    int e = flow_add_edge(lf, a, b, "out", "in");
+    flow_set_edge_label(lf, e, "Lbl");
+    flow_render(lf, lb, lc, lr);
+    int found = 0;
+    for (int i = 0; i < lc * lr; i++) if (lb[i].ch == 'L') found = 1;  /* first label glyph present */
+    ASSERT(found, "edge label glyph 'L' rendered");
+    char *ls = cells_to_string(lb, lc, lr);
+    SNAPSHOT("render_edge_label", ls); free(ls);
+    free(lb); flow_free(lf);
+  }
+
+  /* edge selected: the routed path carries FLOW_BOLD on its cells */
+  {
+    int xc = 24, xr = 6;
+    flow_cell *xb = (flow_cell*)malloc((size_t)xc * xr * sizeof(flow_cell));
+    flow_t *xf = flow_new(xc, xr); flow_register_defaults(xf);
+    int a = flow_add_node(xf, "default", (flow_pt){0, 1}, (void*)"A");
+    int b = flow_add_node(xf, "default", (flow_pt){14, 1}, (void*)"B");
+    int e = flow_add_edge(xf, a, b, "out", "in");
+    flow_select_edge(xf, e, 0);
+    flow_render(xf, xb, xc, xr);
+    int bold_cells = 0;
+    for (int i = 0; i < xc * xr; i++) {
+      uint32_t c = xb[i].ch;
+      int is_path = (c==0x2500||c==0x2502||c==0x250C||c==0x2510||c==0x2514||c==0x2518||
+                     c==0x25B6||c==0x25C0||c==0x25BC||c==0x25B2);
+      if (is_path && (xb[i].attr & FLOW_BOLD)) bold_cells++;
+    }
+    ASSERT(bold_cells >= 1, "selected edge has >=1 bold routed cell");
+    char *xs = cells_to_string(xb, xc, xr);
+    SNAPSHOT("render_edge_selected", xs); free(xs);
+    free(xb); flow_free(xf);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }
