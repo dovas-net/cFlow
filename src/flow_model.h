@@ -127,6 +127,9 @@ typedef struct {
   void (*on_node_click)(flow_t *f, int node, void *user);                  /* left-click (no drag)  */
   void (*on_pane_click)(flow_t *f, flow_pt world, void *user);             /* left-click empty space */
   void (*on_connect)(flow_t *f, int source, int target, void *user);      /* a connection was created (after flow_add_edge) */
+  void (*on_node_dblclick)(flow_t *f, int node, void *user);              /* left double-click on a node body (fires AFTER on_node_click) */
+  void (*on_selection_change)(flow_t *f, const int *ids, int n, void *user); /* fired after the FLOW_SELECTED node set changes; ids in insertion order, only on actual change */
+  void (*on_nodes_delete)(flow_t *f, const int *ids, int n, void *user);  /* fired once per delete op with the removed node id set (a cascade reports its children) */
   void *user;
 } flow_callbacks;
 void flow_set_callbacks(flow_t *f, flow_callbacks cb);
@@ -150,6 +153,8 @@ struct flow {
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
+  int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
+  int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
@@ -170,7 +175,7 @@ flow_t *flow_new(int cols, int rows) {
   f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
-  f->reconnect_edge = -1;
+  f->reconnect_edge = -1; f->last_click_node = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
@@ -190,6 +195,7 @@ static void flow__graph_reset(flow_t *f) {
   f->nodes = NULL; f->edges = NULL;
   f->nnodes = f->capnodes = 0; f->nedges = f->capedges = 0;
   f->nextid = 1; f->nexteid = 1;
+  f->last_click_node = -1;   /* drop the stale dblclick target: reused ids must not fake a double-click */
 }
 void flow_resize(flow_t *f, int cols, int rows) {
   f->cols = cols; f->rows = rows; free(f->front);
@@ -395,19 +401,56 @@ void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; }
 flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->view, world_abs); }
 flow_pt flow_to_world(flow_t *f, flow_pt screen) { return flow_unproject(f->view, screen); }
 flow_viewport flow_view_get(flow_t *f) { return f->view; }
+/* ---- observer plumbing (events package) ---- */
+/* order-sensitive signature of the FLOW_SELECTED node set: differs iff the set or its
+   insertion order changes. Lets on_selection_change fire ONLY on an actual change. */
+static unsigned long flow__sel_sig(flow_t *f) {
+  unsigned long sig = 1469598103934665603UL; int c = 0;          /* FNV-1a seed */
+  for (int i = 0; i < f->nnodes; i++)
+    if (f->nodes[i].flags & FLOW_SELECTED) { sig = (sig ^ (unsigned long)f->nodes[i].id) * 1099511628211UL; c++; }
+  return sig ^ ((unsigned long)c << 1);
+}
+/* fire on_selection_change iff the selected set changed vs sig_before and we are not
+   inside a suppressed (recursive/aggregate) mutator. ids = selected ids, insertion order. */
+static void flow__notify_selection(flow_t *f, unsigned long sig_before) {
+  if (!f->cb.on_selection_change || f->cb_suppress) return;
+  if (flow__sel_sig(f) == sig_before) return;
+  int n = flow_selected_count(f);
+  int *ids = n > 0 ? (int*)malloc((size_t)n * sizeof(int)) : NULL;
+  if (n > 0) flow_selected_nodes(f, ids, n);
+  f->cb.on_selection_change(f, ids, n, f->cb.user);
+  free(ids);
+}
+/* 1 if node `id` is selected or has a selected ancestor — i.e. it will be removed when the
+   current selection is deleted (flow_remove_node cascades a selected node's descendants). */
+static int flow__sel_or_ancestor(flow_t *f, int id) {
+  int guard = 0;
+  while (id != -1 && guard++ < 1024) {
+    flow_node *n = flow_get_node(f, id); if (!n) break;
+    if (n->flags & FLOW_SELECTED) return 1;
+    id = n->parent;
+  }
+  return 0;
+}
 void flow_select_node(flow_t *f, int id, int additive) {
+  unsigned long sig = flow__sel_sig(f);
   if (!additive) {
     for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
     for (int i = 0; i < f->nedges; i++) f->edges[i].flags &= ~FLOW_SELECTED;  /* mutual exclusivity: deselect any edge */
   }
   flow_node *n = flow_get_node(f, id); if (n) n->flags |= FLOW_SELECTED;
+  flow__notify_selection(f, sig);
 }
 void flow_toggle_node(flow_t *f, int id) {
+  unsigned long sig = flow__sel_sig(f);
   flow_node *n = flow_get_node(f, id); if (n) n->flags ^= FLOW_SELECTED;  /* never clears others */
+  flow__notify_selection(f, sig);
 }
 void flow_clear_selection(flow_t *f) {
+  unsigned long sig = flow__sel_sig(f);
   for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
   for (int i = 0; i < f->nedges; i++) f->edges[i].flags &= ~FLOW_SELECTED;  /* edges too */
+  flow__notify_selection(f, sig);
 }
 int flow_selected_node(flow_t *f) { for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) return f->nodes[i].id; return -1; }
 int flow_selected_count(flow_t *f) { int c = 0; for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) c++; return c; }
@@ -417,7 +460,10 @@ int flow_selected_nodes(flow_t *f, int *out, int max) {
   return c;
 }
 int flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int additive) {
+  unsigned long sig = flow__sel_sig(f);
+  f->cb_suppress++;                                   /* the internal clear must not fire its own change event */
   if (!additive) flow_clear_selection(f);
+  f->cb_suppress--;
   int c = 0;
   for (int i = 0; i < f->nnodes; i++) {
     flow_node *n = &f->nodes[i];
@@ -431,6 +477,7 @@ int flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int a
     }
     if (hit) { n->flags |= FLOW_SELECTED; c++; }
   }
+  flow__notify_selection(f, sig);                     /* one fire per call, only if the set changed */
   return c;
 }
 void flow_set_marquee_mode(flow_t *f, flow_select_mode mode) { f->marquee_mode = mode; }
@@ -491,6 +538,23 @@ void flow_remove_edge(flow_t *f, int id) {
   /* absent id: no-op */
 }
 void flow_remove_node(flow_t *f, int id) {
+  /* on a DIRECT call (not a recursion or a delete_selection-suppressed one), fire
+     on_nodes_delete once for this node + its whole descendant cascade, in insertion order,
+     BEFORE removal so the app can still read node->data. Recursive child removals below run
+     suppressed so they never refire. */
+  int top = (f->cb_suppress == 0);
+  unsigned long sig = 0;
+  if (top) {
+    sig = flow__sel_sig(f);
+    if (f->cb.on_nodes_delete) {
+      int *ids = f->nnodes ? (int*)malloc((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+      for (int i = 0; i < f->nnodes; i++)
+        if (flow_is_ancestor(f, id, f->nodes[i].id)) ids[n++] = f->nodes[i].id; /* id and its descendants */
+      if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
+      free(ids);
+    }
+  }
+  f->cb_suppress++;
   /* never hold a node/edge pointer across mutation: re-find by id each step (array moves). */
   for (;;) {                                                  /* recursively remove child nodes first */
     int childid = -1;
@@ -509,14 +573,29 @@ void flow_remove_node(flow_t *f, int id) {
     if (f->nodes[i].id != id) continue;
     memmove(&f->nodes[i], &f->nodes[i+1], (size_t)(f->nnodes - i - 1) * sizeof(flow_node));
     f->nnodes--;
-    return;
+    break;                                                    /* break (not return) so cleanup below runs */
   }
+  f->cb_suppress--;
+  if (top) flow__notify_selection(f, sig);                    /* selection shrank if a selected node vanished */
 }
 void flow_delete_selection(flow_t *f) {
   /* remove all selected nodes (each cascades children + incident edges); re-query
-     after each removal so any count works and cascade-removed selections are skipped */
+     after each removal so any count works and cascade-removed selections are skipped.
+     on_nodes_delete fires ONCE here with the full set (selected ∪ their descendants);
+     the inner flow_remove_node calls run suppressed so they don't each refire. */
+  unsigned long sig = flow__sel_sig(f);
+  if (f->cb.on_nodes_delete) {
+    int *ids = f->nnodes ? (int*)malloc((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+    for (int i = 0; i < f->nnodes; i++)
+      if (flow__sel_or_ancestor(f, f->nodes[i].id)) ids[n++] = f->nodes[i].id;
+    if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
+    free(ids);
+  }
+  f->cb_suppress++;
   for (;;) { int id = flow_selected_node(f); if (id < 0) break; flow_remove_node(f, id); }
   for (;;) { int e  = flow_selected_edge(f); if (e  < 0) break; flow_remove_edge(f, e);  }
+  f->cb_suppress--;
+  flow__notify_selection(f, sig);
 }
 int flow_add_node_center(flow_t *f, const char *type, void *data) {
   flow_pt c = flow_to_world(f, (flow_pt){ f->cols / 2, f->rows / 2 });

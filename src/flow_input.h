@@ -215,9 +215,16 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
       if (f->down_modsel) {
         /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
+        f->last_click_node = -1;                 /* a modifier-click breaks any double-click pair */
       } else if (f->down_node != -1) {
         flow_select_node(f, f->down_node, 0);
         if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
+        if (f->down_node == f->last_click_node) { /* 2nd consecutive plain click on the SAME node: double-click */
+          if (f->cb.on_node_dblclick) f->cb.on_node_dblclick(f, f->down_node, f->cb.user); /* fires AFTER on_node_click */
+          f->last_click_node = -1;               /* consume the pair so a 3rd click starts fresh */
+        } else {
+          f->last_click_node = f->down_node;
+        }
       } else {
         int eclick = flow_hit_edge(f, scr, 1);   /* edge-body click-select before clearing/pane-click */
         if (eclick != -1) {
@@ -226,6 +233,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           flow_clear_selection(f);
           if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
         }
+        f->last_click_node = -1;                 /* edge/pane click breaks a double-click pair */
       }
     } else if (f->moved && f->drag_node != -1 && flow_selected_count(f) == 1) {
       /* DRAG-TO-REPARENT (single-node drag only for v1). On drop, hit-test the cursor for a
@@ -256,6 +264,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     }
     /* marquee finalize: selection already applied during motion; just clear state.
        A marqueed drag sets moved==1, so on_pane_click was never fired. */
+    if (f->moved) f->last_click_node = -1;       /* any drag breaks a double-click pair */
     f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
     f->down_modsel = 0; f->marquee_active = 0; f->marquee_on = 0;
   }
