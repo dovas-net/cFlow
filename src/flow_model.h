@@ -46,11 +46,17 @@ flow_pt   flow_to_screen(flow_t *f, flow_pt world_abs);
 flow_pt   flow_to_world(flow_t *f, flow_pt screen);
 flow_viewport flow_view_get(flow_t *f);
 
-/* selection (single-select for now; `additive` reserved for shift-multi-select) */
-void flow_select_node(flow_t *f, int id, int additive);
+/* selection — a true set, expressed via the FLOW_SELECTED node flag */
+typedef enum { FLOW_SELECT_PARTIAL, FLOW_SELECT_FULL } flow_select_mode;
+void flow_select_node(flow_t *f, int id, int additive);  /* additive=0 clears others then sets; additive=1 sets without clearing */
+void flow_toggle_node(flow_t *f, int id);   /* add to selection if unset, remove if set; never clears others */
 void flow_clear_selection(flow_t *f);
 int  flow_selected_node(flow_t *f);   /* first selected node id, or -1 */
 int  flow_selected_edge(flow_t *f);   /* first selected edge id, or -1 */
+int  flow_selected_count(flow_t *f);  /* number of FLOW_SELECTED nodes */
+int  flow_selected_nodes(flow_t *f, int *out, int max);  /* fill out[] with selected ids in insertion order; returns total count (may exceed max) */
+int  flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int additive);  /* select nodes contained (FULL) or intersecting (PARTIAL) the world rect; !additive clears first; returns count selected */
+void flow_set_marquee_mode(flow_t *f, flow_select_mode mode);  /* default mode for shift-drag marquee (defaults to FLOW_SELECT_PARTIAL) */
 
 /* mutators (callers re-fetch node/edge pointers after these — array may move) */
 void flow_remove_node(flow_t *f, int id);  /* cascades incident edges AND child nodes (recursive), frees edge labels */
@@ -90,7 +96,11 @@ struct flow {
   const flow_edge_type **etypes; int netypes;
   flow_viewport view; int cols, rows; flow_cell *front; int running;
   int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
+  flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
+  int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
+  int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
+  flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
   struct { flow_bg_variant variant; int gap; } bg;
@@ -105,7 +115,7 @@ static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
 flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
   f->view.zoom = 1; f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
-  f->drag_node = -1;
+  f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
@@ -197,8 +207,35 @@ void flow_select_node(flow_t *f, int id, int additive) {
   if (!additive) for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
   flow_node *n = flow_get_node(f, id); if (n) n->flags |= FLOW_SELECTED;
 }
+void flow_toggle_node(flow_t *f, int id) {
+  flow_node *n = flow_get_node(f, id); if (n) n->flags ^= FLOW_SELECTED;  /* never clears others */
+}
 void flow_clear_selection(flow_t *f) { for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED; }
 int flow_selected_node(flow_t *f) { for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) return f->nodes[i].id; return -1; }
+int flow_selected_count(flow_t *f) { int c = 0; for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) c++; return c; }
+int flow_selected_nodes(flow_t *f, int *out, int max) {
+  int c = 0;                                            /* insertion order; total may exceed max */
+  for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) { if (c < max && out) out[c] = f->nodes[i].id; c++; }
+  return c;
+}
+int flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int additive) {
+  if (!additive) flow_clear_selection(f);
+  int c = 0;
+  for (int i = 0; i < f->nnodes; i++) {
+    flow_node *n = &f->nodes[i];
+    flow_rect nr = flow_node_rect_abs(f, n);            /* world rect; zoom==1 carry-over */
+    int hit;
+    if (mode == FLOW_SELECT_FULL) {                     /* node fully inside marquee */
+      hit = nr.x >= world.x && nr.y >= world.y &&
+            nr.x + nr.w <= world.x + world.w && nr.y + nr.h <= world.y + world.h;
+    } else {                                            /* PARTIAL: any overlap */
+      hit = flow_rect_intersects(world, nr);
+    }
+    if (hit) { n->flags |= FLOW_SELECTED; c++; }
+  }
+  return c;
+}
+void flow_set_marquee_mode(flow_t *f, flow_select_mode mode) { f->marquee_mode = mode; }
 void flow_set_callbacks(flow_t *f, flow_callbacks cb) { f->cb = cb; }
 void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h) {
   f->minimap.enabled = enabled; f->minimap.corner = corner; f->minimap.w = w; f->minimap.h = h;

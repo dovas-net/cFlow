@@ -18,5 +18,19 @@ int main(void) {
   flow_rect u = flow_rect_union((flow_rect){0, 0, 2, 2}, (flow_rect){5, 5, 2, 2});
   ASSERT_INT(u.x, 0, "union x"); ASSERT_INT(u.y, 0, "union y");
   ASSERT_INT(u.w, 7, "union w"); ASSERT_INT(u.h, 7, "union h");
+
+  /* flow_rect_intersects: overlap true; disjoint false; edge-touch counts;
+     containment implies intersects (symmetric). */
+  flow_rect r1 = {0, 0, 4, 4}, r2 = {2, 2, 4, 4};   /* overlap in (2,2)..(3,3) */
+  ASSERT(flow_rect_intersects(r1, r2), "overlapping rects intersect");
+  ASSERT(flow_rect_intersects(r2, r1), "intersects is symmetric");
+  flow_rect r3 = {10, 10, 2, 2};                     /* clearly disjoint from r1 */
+  ASSERT(!flow_rect_intersects(r1, r3), "disjoint rects do not intersect");
+  ASSERT(!flow_rect_intersects(r3, r1), "disjoint symmetric");
+  flow_rect r4 = {4, 0, 4, 4};                        /* r1 right edge x=4 touches r4 left edge x=4 */
+  ASSERT(flow_rect_intersects(r1, r4), "edge-touching rects count as intersecting");
+  flow_rect big = {0, 0, 10, 10}, small = {3, 3, 2, 2};  /* big contains small */
+  ASSERT(flow_rect_intersects(big, small), "containment implies intersects");
+  ASSERT(flow_rect_intersects(small, big), "containment implies intersects (sym)");
   return flowtest_report("test_geom");
 }

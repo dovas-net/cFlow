@@ -53,32 +53,71 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     }
     if (ev->button == 0) {                       /* arm a press; classify on move/release */
       f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+      /* HIT PRECEDENCE (trio invariant): a later package inserts higher-priority
+         hit-tests (flow_hit_handle, then flow_hit_edge) ABOVE flow_hit_node here.
+         For now: node-body (flow_hit_node) -> pane. */
       f->down_node = flow_hit_node(f, scr);
       f->drag_node = -1; f->dragging_pan = 0;
+      f->down_modsel = 0; f->marquee_active = 0;
+      unsigned mod = ev->mods & (FLOW_MOD_SHIFT | FLOW_MOD_CTRL);
+      if (f->down_node != -1) {
+        if (mod) {                               /* shift/ctrl-click a node: modify the set NOW */
+          if (ev->mods & FLOW_MOD_CTRL) flow_toggle_node(f, f->down_node);  /* toggle */
+          else                          flow_select_node(f, f->down_node, 1);/* shift: additive add */
+          f->down_modsel = 1;                    /* suppress release replace + on_node_click; arm group drag */
+        }
+        /* no-mod node press: classify on move/release as before (no select on press) */
+      } else if (ev->mods & FLOW_MOD_SHIFT) {    /* shift-drag empty pane: arm marquee (anchor = down_pos) */
+        f->marquee_active = 1;
+      }
     }
   } else if (ev->type == FLOW_MOUSE_MOTION) {
     if (!f->mouse_down) return;
     if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
-      f->moved = 1;                              /* threshold crossed: begin drag or pan */
-      if (f->down_node != -1) {
+      f->moved = 1;                              /* threshold crossed: begin drag, marquee, or pan */
+      if (f->marquee_active) {
+        f->marquee_on = 1; f->marquee_anchor = f->down_pos;
+      } else if (f->down_node != -1) {
         flow_node *nd = flow_get_node(f, f->down_node);
         flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
         f->drag_node = f->down_node; f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;
-        flow_select_node(f, f->down_node, 0);    /* selectNodesOnDrag */
+        f->drag_last_world = flow_to_world(f, f->down_pos);   /* multi-drag delta anchor */
+        if (!(nd->flags & FLOW_SELECTED))        /* unselected node: plain drag REPLACES selection */
+          flow_select_node(f, f->down_node, 0);  /* selectNodesOnDrag; selected node keeps the set (group drag) */
       } else {
         f->dragging_pan = 1; f->last_mouse = f->down_pos;
       }
     }
-    if (f->drag_node != -1) {
-      flow_pt w = flow_to_world(f, scr);
-      flow_move_node(f, f->drag_node, (flow_pt){ w.x - f->drag_grab.x, w.y - f->drag_grab.y });
+    if (f->marquee_on) {                          /* live marquee: replace-select within the box */
+      f->marquee_cur = scr;
+      flow_pt wa = flow_to_world(f, f->marquee_anchor), wc = flow_to_world(f, scr);
+      flow_rect wr = { wa.x < wc.x ? wa.x : wc.x, wa.y < wc.y ? wa.y : wc.y,
+                       (wa.x < wc.x ? wc.x - wa.x : wa.x - wc.x),
+                       (wa.y < wc.y ? wc.y - wa.y : wa.y - wc.y) };
+      flow_select_in_rect(f, wr, f->marquee_mode, 0);
+    } else if (f->drag_node != -1) {
+      if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift whole set by per-motion world delta */
+        flow_pt w = flow_to_world(f, scr);
+        int dx = w.x - f->drag_last_world.x, dy = w.y - f->drag_last_world.y;
+        if (dx || dy) {
+          for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) {
+            flow_pt p = f->nodes[i].pos; flow_move_node(f, f->nodes[i].id, (flow_pt){ p.x + dx, p.y + dy });
+          }
+          f->drag_last_world = w;
+        }
+      } else {                                    /* single node: grab-offset move (unchanged) */
+        flow_pt w = flow_to_world(f, scr);
+        flow_move_node(f, f->drag_node, (flow_pt){ w.x - f->drag_grab.x, w.y - f->drag_grab.y });
+      }
     } else if (f->dragging_pan) {
       flow_pan(f, scr.x - f->last_mouse.x, scr.y - f->last_mouse.y);
       f->last_mouse = scr;
     }
   } else if (ev->type == FLOW_MOUSE_RELEASE) {
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
-      if (f->down_node != -1) {
+      if (f->down_modsel) {
+        /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
+      } else if (f->down_node != -1) {
         flow_select_node(f, f->down_node, 0);
         if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
       } else {
@@ -86,7 +125,10 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
       }
     }
+    /* marquee finalize: selection already applied during motion; just clear state.
+       A marqueed drag sets moved==1, so on_pane_click was never fired. */
     f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
+    f->down_modsel = 0; f->marquee_active = 0; f->marquee_on = 0;
   }
 }
 #endif

@@ -90,16 +90,39 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     free(rt.cells);
   }
 
-  /* nodes on top, in insertion order (selected-last refinement comes in a later increment) */
-  for (int i = 0; i < flow_node_count(f); i++) {
-    flow_node *n = &flow_nodes(f)[i];
-    flow_rect wr = flow_node_rect_abs(f, n);
-    flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
-    const flow_node_type *nt = flow_node_type_for(f, n->type);
-    if (!nt || !nt->render) continue;
-    flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
-    flow_render_ctx ctx = { f->view.zoom, n->flags, 0 };
-    nt->render(n, &surf, ctx);
+  /* nodes on top — TWO passes over the same array so selected nodes draw LAST
+     (on top), with insertion order preserved within each pass. pass 0: unselected,
+     pass 1: selected. */
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 0; i < flow_node_count(f); i++) {
+      flow_node *n = &flow_nodes(f)[i];
+      int sel = (n->flags & FLOW_SELECTED) ? 1 : 0;
+      if (sel != pass) continue;
+      flow_rect wr = flow_node_rect_abs(f, n);
+      flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
+      const flow_node_type *nt = flow_node_type_for(f, n->type);
+      if (!nt || !nt->render) continue;
+      flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
+      flow_render_ctx ctx = { f->view.zoom, n->flags, 0 };
+      nt->render(n, &surf, ctx);
+    }
+  }
+
+  /* marquee box (after nodes, before minimap/overlay so app panels still win).
+     anchor/cur are SCREEN coords; stroke a normalized border with a distinct glyph. */
+  if (f->marquee_on) {
+    int x0 = f->marquee_anchor.x, x1 = f->marquee_cur.x;
+    int y0 = f->marquee_anchor.y, y1 = f->marquee_cur.y;
+    if (x1 < x0) { int t = x0; x0 = x1; x1 = t; }
+    if (y1 < y0) { int t = y0; y0 = y1; y1 = t; }
+    for (int x = x0; x <= x1; x++) {                       /* horizontal edges */
+      flow_cellbuf_put(&cb, x, y0, 0x2592, FLOW_FG, FLOW_BG, 0);  /* ▒ */
+      flow_cellbuf_put(&cb, x, y1, 0x2592, FLOW_FG, FLOW_BG, 0);
+    }
+    for (int y = y0; y <= y1; y++) {                       /* vertical edges */
+      flow_cellbuf_put(&cb, x0, y, 0x2592, FLOW_FG, FLOW_BG, 0);
+      flow_cellbuf_put(&cb, x1, y, 0x2592, FLOW_FG, FLOW_BG, 0);
+    }
   }
 
   if (f->minimap.enabled) flow__minimap(f, &cb);

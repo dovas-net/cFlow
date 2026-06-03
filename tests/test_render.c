@@ -148,6 +148,49 @@ int main(void) {
     free(mb); flow_free(bg);
   }
 
+  /* selected-last draw order: two overlapping nodes; the later-inserted one (Y) is
+     unselected, the earlier one (X) is selected. With selected-last, X draws on top
+     in the overlap. cells_to_string only sees .ch, and bold is an attr, so place them
+     overlapping with different offsets and also assert the overlap cell's glyph+attr. */
+  {
+    int sc = 12, sr = 6;
+    flow_cell *sb = (flow_cell*)malloc((size_t)sc * sr * sizeof(flow_cell));
+    flow_t *sf = flow_new(sc, sr); flow_register_defaults(sf);
+    int x = flow_add_node(sf, "default", (flow_pt){0, 0}, (void*)"X");  /* rect (0,0,5,3) inserted first */
+    flow_add_node(sf, "default", (flow_pt){2, 1}, (void*)"Y");          /* rect (2,1,5,3) inserted second, overlaps */
+    flow_select_node(sf, x, 0);                                         /* X selected (earlier-inserted) */
+    flow_render(sf, sb, sc, sr);
+    /* overlap cell (2,2): X draws its bottom edge ─ (0x2500, BOLD); Y draws its left edge │.
+       selected-last => X wins: glyph is ─ and it is BOLD. */
+    ASSERT_INT(sb[2*sc + 2].ch, 0x2500, "selected node draws on top in overlap (X bottom edge)");
+    ASSERT_INT(sb[2*sc + 2].attr & FLOW_BOLD, FLOW_BOLD, "on-top overlap cell is the selected (bold) node");
+    char *ss = cells_to_string(sb, sc, sr);
+    SNAPSHOT("render_selected_last", ss); free(ss);
+    free(sb); flow_free(sf);
+  }
+
+  /* marquee border: set marquee_on with a known screen anchor/cur and render. The
+     marquee strokes a distinct glyph (0x2592) clipped to the buffer. */
+  {
+    int mc = 12, mr = 6;
+    flow_cell *mb2 = (flow_cell*)malloc((size_t)mc * mr * sizeof(flow_cell));
+    flow_t *mf = flow_new(mc, mr); flow_register_defaults(mf);
+    flow_render(mf, mb2, mc, mr);                 /* empty first to clear */
+    /* directly drive the marquee state the input layer would set */
+    flow_feed(mf, "\x1b[<4;3;2M", 9);            /* shift-press @ screen (2,1) -> anchor */
+    flow_feed(mf, "\x1b[<36;9;5M", 11);          /* shift-motion to screen (8,4) -> live box */
+    flow_render(mf, mb2, mc, mr);
+    ASSERT_INT(mb2[1*mc + 2].ch, 0x2592, "marquee top-left corner glyph");
+    ASSERT_INT(mb2[4*mc + 8].ch, 0x2592, "marquee bottom-right corner glyph");
+    int marq = 0;
+    for (int i = 0; i < mc * mr; i++) if (mb2[i].ch == 0x2592) marq++;
+    ASSERT(marq >= 8, "marquee strokes a border (>=8 cells for a 7x4 box)");
+    char *ms = cells_to_string(mb2, mc, mr);
+    SNAPSHOT("render_marquee", ms); free(ms);
+    flow_feed(mf, "\x1b[<4;9;5m", 9);            /* release to clear marquee state */
+    free(mb2); flow_free(mf);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

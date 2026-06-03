@@ -38,6 +38,35 @@ int main(void) {
   flow_feed(f, "\x1b[<2;32;7M", 10);
   ASSERT_INT(ctx_node, b, "right-click fired on_node_context for B");
 
+  /* ---- multi-select: shift/ctrl-click builds a set ---- */
+  /* the drag above moved A; reset both to their original rects so the SGR
+     click coordinates below land inside the nodes again. */
+  flow_move_node(f, a, (flow_pt){10, 5});
+  flow_move_node(f, b, (flow_pt){30, 5});
+  flow_clear_selection(f);
+  /* SHIFT-click A (button|4=4), then SHIFT-click B -> both selected, count==2 */
+  flow_feed(f, "\x1b[<4;12;7M", 10); flow_feed(f, "\x1b[<4;12;7m", 10);
+  flow_feed(f, "\x1b[<4;32;7M", 10); flow_feed(f, "\x1b[<4;32;7m", 10);
+  ASSERT_INT(flow_selected_count(f), 2, "shift-click A then B -> 2 selected");
+  ASSERT(flow_get_node(f, a)->flags & FLOW_SELECTED, "A selected (multi)");
+  ASSERT(flow_get_node(f, b)->flags & FLOW_SELECTED, "B selected (multi)");
+
+  /* CTRL-click A again (button|16=16) toggles A OFF -> count==1, B remains */
+  flow_feed(f, "\x1b[<16;12;7M", 11); flow_feed(f, "\x1b[<16;12;7m", 11);
+  ASSERT_INT(flow_selected_count(f), 1, "ctrl-click A toggles off -> 1 selected");
+  ASSERT(!(flow_get_node(f, a)->flags & FLOW_SELECTED), "A toggled off");
+  ASSERT(flow_get_node(f, b)->flags & FLOW_SELECTED, "B still selected");
+  int out[8]; int total = flow_selected_nodes(f, out, 8);
+  ASSERT_INT(total, 1, "flow_selected_nodes returns 1");
+  ASSERT_INT(out[0], b, "flow_selected_nodes out[0]==B");
+
+  /* plain (no-mod) click B after a multi-selection -> replace semantics: only B */
+  flow_select_node(f, a, 1);                       /* make it a 2-set first ({A,B}) */
+  ASSERT_INT(flow_selected_count(f), 2, "set up 2-selection before plain click");
+  flow_feed(f, "\x1b[<0;32;7M", 10); flow_feed(f, "\x1b[<0;32;7m", 10);
+  ASSERT_INT(flow_selected_count(f), 1, "plain click B replaces -> 1 selected");
+  ASSERT_INT(flow_selected_node(f), b, "plain click B -> only B selected");
+
   flow_free(f);
   return flowtest_report("test_select");
 }

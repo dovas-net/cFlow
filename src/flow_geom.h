@@ -7,6 +7,7 @@ typedef struct { float ox, oy, zoom; } flow_viewport;
 flow_pt   flow_project(flow_viewport v, flow_pt world);
 flow_pt   flow_unproject(flow_viewport v, flow_pt screen);
 int       flow_rect_contains(flow_rect r, flow_pt p);
+int       flow_rect_intersects(flow_rect a, flow_rect b);  /* true if a and b overlap; edge-touch counts */
 flow_rect flow_rect_union(flow_rect a, flow_rect b);
 
 #ifdef FLOW_IMPLEMENTATION
@@ -25,6 +26,11 @@ flow_pt flow_unproject(flow_viewport v, flow_pt screen) {
 }
 int flow_rect_contains(flow_rect r, flow_pt p) {
   return p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
+}
+int flow_rect_intersects(flow_rect a, flow_rect b) {
+  /* edge-touch counts as overlap (closed convention) — see header: "touching edges count" */
+  return a.x <= b.x + b.w && b.x <= a.x + a.w &&
+         a.y <= b.y + b.h && b.y <= a.y + a.h;
 }
 flow_rect flow_rect_union(flow_rect a, flow_rect b) {
   int x0 = a.x < b.x ? a.x : b.x, y0 = a.y < b.y ? a.y : b.y;

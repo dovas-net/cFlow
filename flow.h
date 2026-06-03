@@ -21,6 +21,7 @@ typedef struct { float ox, oy, zoom; } flow_viewport;
 flow_pt   flow_project(flow_viewport v, flow_pt world);
 flow_pt   flow_unproject(flow_viewport v, flow_pt screen);
 int       flow_rect_contains(flow_rect r, flow_pt p);
+int       flow_rect_intersects(flow_rect a, flow_rect b);  /* true if a and b overlap; edge-touch counts */
 flow_rect flow_rect_union(flow_rect a, flow_rect b);
 
 #ifdef FLOW_IMPLEMENTATION
@@ -39,6 +40,11 @@ flow_pt flow_unproject(flow_viewport v, flow_pt screen) {
 }
 int flow_rect_contains(flow_rect r, flow_pt p) {
   return p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
+}
+int flow_rect_intersects(flow_rect a, flow_rect b) {
+  /* edge-touch counts as overlap (closed convention) — see header: "touching edges count" */
+  return a.x <= b.x + b.w && b.x <= a.x + a.w &&
+         a.y <= b.y + b.h && b.y <= a.y + a.h;
 }
 flow_rect flow_rect_union(flow_rect a, flow_rect b) {
   int x0 = a.x < b.x ? a.x : b.x, y0 = a.y < b.y ? a.y : b.y;
@@ -203,11 +209,17 @@ flow_pt   flow_to_screen(flow_t *f, flow_pt world_abs);
 flow_pt   flow_to_world(flow_t *f, flow_pt screen);
 flow_viewport flow_view_get(flow_t *f);
 
-/* selection (single-select for now; `additive` reserved for shift-multi-select) */
-void flow_select_node(flow_t *f, int id, int additive);
+/* selection — a true set, expressed via the FLOW_SELECTED node flag */
+typedef enum { FLOW_SELECT_PARTIAL, FLOW_SELECT_FULL } flow_select_mode;
+void flow_select_node(flow_t *f, int id, int additive);  /* additive=0 clears others then sets; additive=1 sets without clearing */
+void flow_toggle_node(flow_t *f, int id);   /* add to selection if unset, remove if set; never clears others */
 void flow_clear_selection(flow_t *f);
 int  flow_selected_node(flow_t *f);   /* first selected node id, or -1 */
 int  flow_selected_edge(flow_t *f);   /* first selected edge id, or -1 */
+int  flow_selected_count(flow_t *f);  /* number of FLOW_SELECTED nodes */
+int  flow_selected_nodes(flow_t *f, int *out, int max);  /* fill out[] with selected ids in insertion order; returns total count (may exceed max) */
+int  flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int additive);  /* select nodes contained (FULL) or intersecting (PARTIAL) the world rect; !additive clears first; returns count selected */
+void flow_set_marquee_mode(flow_t *f, flow_select_mode mode);  /* default mode for shift-drag marquee (defaults to FLOW_SELECT_PARTIAL) */
 
 /* mutators (callers re-fetch node/edge pointers after these — array may move) */
 void flow_remove_node(flow_t *f, int id);  /* cascades incident edges AND child nodes (recursive), frees edge labels */
@@ -247,7 +259,11 @@ struct flow {
   const flow_edge_type **etypes; int netypes;
   flow_viewport view; int cols, rows; flow_cell *front; int running;
   int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
+  flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
+  int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
+  int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
+  flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
   struct { flow_bg_variant variant; int gap; } bg;
@@ -262,7 +278,7 @@ static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
 flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
   f->view.zoom = 1; f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
-  f->drag_node = -1;
+  f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
@@ -354,8 +370,35 @@ void flow_select_node(flow_t *f, int id, int additive) {
   if (!additive) for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED;
   flow_node *n = flow_get_node(f, id); if (n) n->flags |= FLOW_SELECTED;
 }
+void flow_toggle_node(flow_t *f, int id) {
+  flow_node *n = flow_get_node(f, id); if (n) n->flags ^= FLOW_SELECTED;  /* never clears others */
+}
 void flow_clear_selection(flow_t *f) { for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_SELECTED; }
 int flow_selected_node(flow_t *f) { for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) return f->nodes[i].id; return -1; }
+int flow_selected_count(flow_t *f) { int c = 0; for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) c++; return c; }
+int flow_selected_nodes(flow_t *f, int *out, int max) {
+  int c = 0;                                            /* insertion order; total may exceed max */
+  for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) { if (c < max && out) out[c] = f->nodes[i].id; c++; }
+  return c;
+}
+int flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int additive) {
+  if (!additive) flow_clear_selection(f);
+  int c = 0;
+  for (int i = 0; i < f->nnodes; i++) {
+    flow_node *n = &f->nodes[i];
+    flow_rect nr = flow_node_rect_abs(f, n);            /* world rect; zoom==1 carry-over */
+    int hit;
+    if (mode == FLOW_SELECT_FULL) {                     /* node fully inside marquee */
+      hit = nr.x >= world.x && nr.y >= world.y &&
+            nr.x + nr.w <= world.x + world.w && nr.y + nr.h <= world.y + world.h;
+    } else {                                            /* PARTIAL: any overlap */
+      hit = flow_rect_intersects(world, nr);
+    }
+    if (hit) { n->flags |= FLOW_SELECTED; c++; }
+  }
+  return c;
+}
+void flow_set_marquee_mode(flow_t *f, flow_select_mode mode) { f->marquee_mode = mode; }
 void flow_set_callbacks(flow_t *f, flow_callbacks cb) { f->cb = cb; }
 void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h) {
   f->minimap.enabled = enabled; f->minimap.corner = corner; f->minimap.w = w; f->minimap.h = h;
@@ -635,16 +678,39 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     free(rt.cells);
   }
 
-  /* nodes on top, in insertion order (selected-last refinement comes in a later increment) */
-  for (int i = 0; i < flow_node_count(f); i++) {
-    flow_node *n = &flow_nodes(f)[i];
-    flow_rect wr = flow_node_rect_abs(f, n);
-    flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
-    const flow_node_type *nt = flow_node_type_for(f, n->type);
-    if (!nt || !nt->render) continue;
-    flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
-    flow_render_ctx ctx = { f->view.zoom, n->flags, 0 };
-    nt->render(n, &surf, ctx);
+  /* nodes on top — TWO passes over the same array so selected nodes draw LAST
+     (on top), with insertion order preserved within each pass. pass 0: unselected,
+     pass 1: selected. */
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 0; i < flow_node_count(f); i++) {
+      flow_node *n = &flow_nodes(f)[i];
+      int sel = (n->flags & FLOW_SELECTED) ? 1 : 0;
+      if (sel != pass) continue;
+      flow_rect wr = flow_node_rect_abs(f, n);
+      flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
+      const flow_node_type *nt = flow_node_type_for(f, n->type);
+      if (!nt || !nt->render) continue;
+      flow_surface surf = { &cb, s.x, s.y, n->w, n->h };
+      flow_render_ctx ctx = { f->view.zoom, n->flags, 0 };
+      nt->render(n, &surf, ctx);
+    }
+  }
+
+  /* marquee box (after nodes, before minimap/overlay so app panels still win).
+     anchor/cur are SCREEN coords; stroke a normalized border with a distinct glyph. */
+  if (f->marquee_on) {
+    int x0 = f->marquee_anchor.x, x1 = f->marquee_cur.x;
+    int y0 = f->marquee_anchor.y, y1 = f->marquee_cur.y;
+    if (x1 < x0) { int t = x0; x0 = x1; x1 = t; }
+    if (y1 < y0) { int t = y0; y0 = y1; y1 = t; }
+    for (int x = x0; x <= x1; x++) {                       /* horizontal edges */
+      flow_cellbuf_put(&cb, x, y0, 0x2592, FLOW_FG, FLOW_BG, 0);  /* ▒ */
+      flow_cellbuf_put(&cb, x, y1, 0x2592, FLOW_FG, FLOW_BG, 0);
+    }
+    for (int y = y0; y <= y1; y++) {                       /* vertical edges */
+      flow_cellbuf_put(&cb, x0, y, 0x2592, FLOW_FG, FLOW_BG, 0);
+      flow_cellbuf_put(&cb, x1, y, 0x2592, FLOW_FG, FLOW_BG, 0);
+    }
   }
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
@@ -715,32 +781,71 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     }
     if (ev->button == 0) {                       /* arm a press; classify on move/release */
       f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+      /* HIT PRECEDENCE (trio invariant): a later package inserts higher-priority
+         hit-tests (flow_hit_handle, then flow_hit_edge) ABOVE flow_hit_node here.
+         For now: node-body (flow_hit_node) -> pane. */
       f->down_node = flow_hit_node(f, scr);
       f->drag_node = -1; f->dragging_pan = 0;
+      f->down_modsel = 0; f->marquee_active = 0;
+      unsigned mod = ev->mods & (FLOW_MOD_SHIFT | FLOW_MOD_CTRL);
+      if (f->down_node != -1) {
+        if (mod) {                               /* shift/ctrl-click a node: modify the set NOW */
+          if (ev->mods & FLOW_MOD_CTRL) flow_toggle_node(f, f->down_node);  /* toggle */
+          else                          flow_select_node(f, f->down_node, 1);/* shift: additive add */
+          f->down_modsel = 1;                    /* suppress release replace + on_node_click; arm group drag */
+        }
+        /* no-mod node press: classify on move/release as before (no select on press) */
+      } else if (ev->mods & FLOW_MOD_SHIFT) {    /* shift-drag empty pane: arm marquee (anchor = down_pos) */
+        f->marquee_active = 1;
+      }
     }
   } else if (ev->type == FLOW_MOUSE_MOTION) {
     if (!f->mouse_down) return;
     if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
-      f->moved = 1;                              /* threshold crossed: begin drag or pan */
-      if (f->down_node != -1) {
+      f->moved = 1;                              /* threshold crossed: begin drag, marquee, or pan */
+      if (f->marquee_active) {
+        f->marquee_on = 1; f->marquee_anchor = f->down_pos;
+      } else if (f->down_node != -1) {
         flow_node *nd = flow_get_node(f, f->down_node);
         flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
         f->drag_node = f->down_node; f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;
-        flow_select_node(f, f->down_node, 0);    /* selectNodesOnDrag */
+        f->drag_last_world = flow_to_world(f, f->down_pos);   /* multi-drag delta anchor */
+        if (!(nd->flags & FLOW_SELECTED))        /* unselected node: plain drag REPLACES selection */
+          flow_select_node(f, f->down_node, 0);  /* selectNodesOnDrag; selected node keeps the set (group drag) */
       } else {
         f->dragging_pan = 1; f->last_mouse = f->down_pos;
       }
     }
-    if (f->drag_node != -1) {
-      flow_pt w = flow_to_world(f, scr);
-      flow_move_node(f, f->drag_node, (flow_pt){ w.x - f->drag_grab.x, w.y - f->drag_grab.y });
+    if (f->marquee_on) {                          /* live marquee: replace-select within the box */
+      f->marquee_cur = scr;
+      flow_pt wa = flow_to_world(f, f->marquee_anchor), wc = flow_to_world(f, scr);
+      flow_rect wr = { wa.x < wc.x ? wa.x : wc.x, wa.y < wc.y ? wa.y : wc.y,
+                       (wa.x < wc.x ? wc.x - wa.x : wa.x - wc.x),
+                       (wa.y < wc.y ? wc.y - wa.y : wa.y - wc.y) };
+      flow_select_in_rect(f, wr, f->marquee_mode, 0);
+    } else if (f->drag_node != -1) {
+      if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift whole set by per-motion world delta */
+        flow_pt w = flow_to_world(f, scr);
+        int dx = w.x - f->drag_last_world.x, dy = w.y - f->drag_last_world.y;
+        if (dx || dy) {
+          for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) {
+            flow_pt p = f->nodes[i].pos; flow_move_node(f, f->nodes[i].id, (flow_pt){ p.x + dx, p.y + dy });
+          }
+          f->drag_last_world = w;
+        }
+      } else {                                    /* single node: grab-offset move (unchanged) */
+        flow_pt w = flow_to_world(f, scr);
+        flow_move_node(f, f->drag_node, (flow_pt){ w.x - f->drag_grab.x, w.y - f->drag_grab.y });
+      }
     } else if (f->dragging_pan) {
       flow_pan(f, scr.x - f->last_mouse.x, scr.y - f->last_mouse.y);
       f->last_mouse = scr;
     }
   } else if (ev->type == FLOW_MOUSE_RELEASE) {
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
-      if (f->down_node != -1) {
+      if (f->down_modsel) {
+        /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
+      } else if (f->down_node != -1) {
         flow_select_node(f, f->down_node, 0);
         if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
       } else {
@@ -748,7 +853,10 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
       }
     }
+    /* marquee finalize: selection already applied during motion; just clear state.
+       A marqueed drag sets moved==1, so on_pane_click was never fired. */
     f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
+    f->down_modsel = 0; f->marquee_active = 0; f->marquee_on = 0;
   }
 }
 #endif
