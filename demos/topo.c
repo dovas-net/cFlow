@@ -82,6 +82,7 @@ int main(void) {
   cb.on_overlay      = on_overlay;
   flow_set_callbacks(f, cb);
   flow_set_minimap(f, 1, FLOW_CORNER_TR, 22, 7);
+  flow_set_background(f, FLOW_BG_DOTS, 4);
 
   flow_run(f);
   flow_free(f);

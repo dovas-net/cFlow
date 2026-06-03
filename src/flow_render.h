@@ -2,6 +2,29 @@
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows);
 
 #ifdef FLOW_IMPLEMENTATION
+/* Grid "light" comes from a dim 256-color fg, NOT FLOW_DIM: flow_diff_emit
+   serializes only BOLD/REVERSE attrs but always the ;38;5;<fg> color path, so a
+   DIM-attr grid would look full-intensity on a real terminal. 8 = bright black. */
+#define FLOW_BG_GRID_FG 8
+static void flow__background(flow_t *f, flow_cellbuf *cb) {
+  int gap = f->bg.gap;  /* setter guarantees gap >= 1 when variant != NONE */
+  for (int sy = 0; sy < cb->h; sy++) for (int sx = 0; sx < cb->w; sx++) {
+    flow_pt w = flow_to_world(f, (flow_pt){ sx, sy });  /* world-align under pan */
+    int onx = (w.x % gap) == 0, ony = (w.y % gap) == 0; /* ==0 is sign-safe in C */
+    uint32_t ch = 0;
+    switch (f->bg.variant) {
+      case FLOW_BG_DOTS:  if (onx && ony) ch = 0x00B7; break;            /* · */
+      case FLOW_BG_CROSS: if (onx && ony) ch = 0x002B; break;            /* + */
+      case FLOW_BG_LINES:
+        if (onx && ony) ch = 0x253C;       /* ┼ intersection wins */
+        else if (onx)   ch = 0x2502;       /* │ vertical          */
+        else if (ony)   ch = 0x2500;       /* ─ horizontal        */
+        break;
+      default: break;
+    }
+    if (ch) flow_cellbuf_put(cb, sx, sy, ch, FLOW_BG_GRID_FG, FLOW_BG, 0);
+  }
+}
 static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
   int bw = f->minimap.w, bh = f->minimap.h;
   if (bw < 4 || bh < 4) return;
@@ -14,6 +37,11 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
   }
   flow_surface s = { cb, ox, oy, bw, bh };
   flow_box(&s, 0, 0, bw, bh, FLOW_FG, FLOW_BG, 0);
+  /* opaque panel: blank the interior so the background grid / edges / nodes
+     underneath don't bleed through (flow_box strokes the border only) */
+  for (int yy = 1; yy < bh - 1; yy++)
+    for (int xx = 1; xx < bw - 1; xx++)
+      flow_put(&s, xx, yy, ' ', FLOW_FG, FLOW_BG, 0);
   int iw = bw - 2, ih = bh - 2;
   /* world window encompasses all nodes and the current screen rect */
   flow_pt w0 = flow_to_world(f, (flow_pt){0, 0});
@@ -40,6 +68,9 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
+
+  /* background grid first (under edges/nodes, so it scrolls with pan) */
+  if (f->bg.variant != FLOW_BG_NONE) flow__background(f, &cb);
 
   /* edges first (drawn under nodes) */
   for (int i = 0; i < flow_edge_count(f); i++) {

@@ -62,6 +62,10 @@ void flow_set_callbacks(flow_t *f, flow_callbacks cb);
 typedef enum { FLOW_CORNER_TL, FLOW_CORNER_TR, FLOW_CORNER_BL, FLOW_CORNER_BR } flow_corner;
 void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h);
 
+/* background grid widget (world-aligned; off by default — pass FLOW_BG_NONE to disable) */
+typedef enum { FLOW_BG_NONE, FLOW_BG_DOTS, FLOW_BG_LINES, FLOW_BG_CROSS } flow_bg_variant;
+void flow_set_background(flow_t *f, flow_bg_variant variant, int gap);
+
 #ifdef FLOW_IMPLEMENTATION
 struct flow {
   flow_node *nodes; int nnodes, capnodes, nextid;
@@ -73,6 +77,7 @@ struct flow {
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
+  struct { flow_bg_variant variant; int gap; } bg;
 };
 static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
   if (need <= *cap) return arr;
@@ -179,5 +184,8 @@ int flow_selected_node(flow_t *f) { for (int i = 0; i < f->nnodes; i++) if (f->n
 void flow_set_callbacks(flow_t *f, flow_callbacks cb) { f->cb = cb; }
 void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h) {
   f->minimap.enabled = enabled; f->minimap.corner = corner; f->minimap.w = w; f->minimap.h = h;
+}
+void flow_set_background(flow_t *f, flow_bg_variant variant, int gap) {
+  f->bg.variant = variant; f->bg.gap = gap < 1 ? 1 : gap;  /* gap>=1 clamp: no modulo-by-zero */
 }
 #endif
