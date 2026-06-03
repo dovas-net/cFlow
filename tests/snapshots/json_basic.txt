@@ -1,0 +1,5 @@
+{"version":1,
+ "viewport":{"ox":7.5,"oy":-4.5,"zoom":1.5},
+ "nodes":[{"id":1,"type":"default","x":6,"y":3,"parent":-1},
+          {"id":2,"type":"default","x":30,"y":10,"parent":-1}],
+ "edges":[{"id":1,"source":1,"target":2,"sourceHandle":"out","targetHandle":"in","type":""}]}

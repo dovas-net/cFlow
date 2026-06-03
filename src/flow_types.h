@@ -23,7 +23,7 @@ const flow_handle flow_default_handles[2] = {
   { "in",  FLOW_HANDLE_TARGET, FLOW_LEFT,  0 },   /* input on left border  */
   { "out", FLOW_HANDLE_SOURCE, FLOW_RIGHT, 0 },   /* output on right border */
 };
-const flow_node_type flow_default_node_type = { "default", flow__default_measure, flow__default_render, flow_default_handles, 2 };
+const flow_node_type flow_default_node_type = { "default", flow__default_measure, flow__default_render, flow_default_handles, 2, NULL, NULL };
 void flow_register_defaults(flow_t *f) {
   flow_register_node_type(f, &flow_default_node_type);
   flow_register_edge_type(f, &flow_default_edge_type);

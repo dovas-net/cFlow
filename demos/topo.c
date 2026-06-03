@@ -24,9 +24,9 @@ typedef struct {
 } device;
 
 static void dev_measure(const flow_node *n, int *w, int *h) {
-  const device *d = (const device*)n->data;
-  int len = (int)strlen(d->label);
-  if ((int)strlen(d->kind) > len) len = (int)strlen(d->kind);
+  const device *d = (const device*)n->data;   /* NULL during flow_load's initial add (data set by dev_load, then re-measured) */
+  int len = d ? (int)strlen(d->label) : 0;
+  if (d && (int)strlen(d->kind) > len) len = (int)strlen(d->kind);
   *w = len + 4; *h = 4;
 }
 static void dev_render(const flow_node *n, flow_surface *s, flow_render_ctx ctx) {
@@ -40,8 +40,31 @@ static void dev_render(const flow_node *n, flow_surface *s, flow_render_ctx ctx)
   flow_text(s, 2, 1, d->label, FLOW_FG, FLOW_BG, bold);
   flow_text(s, 2, 2, d->kind,  FLOW_FG, FLOW_BG, 0);
 }
+/* JSON persistence hooks: write/read the device struct as one JSON value.
+   dev_load mallocs a device per node — app-owned memory the library never frees
+   (process exit reclaims it here). */
+static void dev_save(const flow_node *n, FILE *out) {
+  const device *d = (const device*)n->data;
+  fputs("{\"label\":", out);  flow__json_str(out, d->label);
+  fputs(",\"kind\":", out);   flow__json_str(out, d->kind);
+  fputs(",\"ip\":", out);     flow__json_str(out, d->ip);
+  fputs(",\"status\":", out); flow__json_str(out, d->status);
+  fputs(",\"os\":", out);     flow__json_str(out, d->os);
+  fputc('}', out);
+}
+static void dev_load(flow_node *n, const char *data_json) {
+  device *d = (device*)calloc(1, sizeof *d);
+  const char *end = data_json + strlen(data_json);
+  flow_json_rd fld;
+  if (flow__json_find(data_json, end, "label", &fld))  flow__json_strv(fld, d->label,  (int)sizeof d->label);
+  if (flow__json_find(data_json, end, "kind", &fld))   flow__json_strv(fld, d->kind,   (int)sizeof d->kind);
+  if (flow__json_find(data_json, end, "ip", &fld))     flow__json_strv(fld, d->ip,     (int)sizeof d->ip);
+  if (flow__json_find(data_json, end, "status", &fld)) flow__json_strv(fld, d->status, (int)sizeof d->status);
+  if (flow__json_find(data_json, end, "os", &fld))     flow__json_strv(fld, d->os,     (int)sizeof d->os);
+  n->data = d;
+}
 /* reuse the default LEFT-'in' / RIGHT-'out' ports so devices are connectable */
-static const flow_node_type DEVICE = { "device", dev_measure, dev_render, flow_default_handles, 2 };
+static const flow_node_type DEVICE = { "device", dev_measure, dev_render, flow_default_handles, 2, dev_save, dev_load };
 
 /* app state for the details panel */
 static int g_info_node = -1;
@@ -76,11 +99,16 @@ int main(void) {
   flow_register_defaults(f);
   flow_register_node_type(f, &DEVICE);
 
-  int a = flow_add_node(f, "device", (flow_pt){ 6,  3}, &dws);
-  int b = flow_add_node(f, "device", (flow_pt){40, 14}, &ddb);
-  int c = flow_add_node(f, "device", (flow_pt){62,  5}, &dca);
-  flow_add_edge(f, a, b, "", "");
-  flow_add_edge(f, a, c, "", "");
+  /* Persistence: load the saved topology on start if present (device data fully
+     restored via dev_load); otherwise seed the demo graph. Save on quit. */
+  const char *path = "topo.json";
+  if (flow_load(f, path) != 0) {
+    int a = flow_add_node(f, "device", (flow_pt){ 6,  3}, &dws);
+    int b = flow_add_node(f, "device", (flow_pt){40, 14}, &ddb);
+    int c = flow_add_node(f, "device", (flow_pt){62,  5}, &dca);
+    flow_add_edge(f, a, b, "", "");
+    flow_add_edge(f, a, c, "", "");
+  }
 
   flow_callbacks cb = {0};
   cb.on_node_context = on_context;
@@ -91,6 +119,7 @@ int main(void) {
   flow_set_background(f, FLOW_BG_DOTS, 4);
 
   flow_run(f);
+  flow_save(f, path);   /* save on quit: topology survives across runs */
   flow_free(f);
   return 0;
 }

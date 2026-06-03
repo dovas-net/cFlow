@@ -17,7 +17,10 @@ typedef struct { float zoom; unsigned flags; int lod; } flow_render_ctx;
 typedef struct { const char *type;
   void (*measure)(const flow_node*, int*, int*);
   void (*render)(const flow_node*, flow_surface*, flow_render_ctx);
-  const flow_handle *handles; int handle_count; } flow_node_type;
+  const flow_handle *handles; int handle_count;
+  void (*save)(const flow_node *n, FILE *out);        /* optional: write node->data as ONE JSON value (omitted if NULL) */
+  void (*load)(flow_node *n, const char *data_json);  /* optional: parse node->data from a NUL-terminated copy of the "data" value span */
+} flow_node_type;
 typedef struct { const char *type;
   void (*route)(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_route *out); } flow_edge_type;
 
@@ -51,6 +54,10 @@ void      flow_pan(flow_t *f, int dx, int dy);
 flow_pt   flow_to_screen(flow_t *f, flow_pt world_abs);
 flow_pt   flow_to_world(flow_t *f, flow_pt screen);
 flow_viewport flow_view_get(flow_t *f);
+
+/* JSON persistence (implemented in src/flow_json.h, amalgamated after flow_render) */
+int flow_save(flow_t *f, const char *path);  /* writes JSON; 0 ok, -1 on I/O/encode error */
+int flow_load(flow_t *f, const char *path);  /* resets f then rebuilds from JSON; 0 ok, -1 on open/parse error */
 
 /* handles & connections (port-handle drag/click to create edges) */
 flow_pt flow_handle_anchor(flow_t *f, const flow_node *n, const flow_handle *h); /* world-abs cell: TOP->(x+w/2,y) RIGHT->(x+w-1,y+h/2) BOTTOM->(x+w/2,y+h-1) LEFT->(x,y+h/2), +'along' offset along the side */
@@ -156,6 +163,18 @@ void flow_free(flow_t *f) {
   if (!f) return;
   for (int i = 0; i < f->nedges; i++) free(f->edges[i].label);
   free(f->nodes); free(f->edges); free(f->ntypes); free(f->etypes); free(f->front); free(f);
+}
+/* Tear the graph back to empty for flow_load: free edge labels + node/edge arrays,
+   NULL the pointers, zero counts/caps, reset id counters. Leaves view/types/cb/widgets
+   intact. NEVER frees node->data (app owns it; same contract as flow_free).
+   NOTE (serialize×undo seam): when undo lands, this must also clear the undo journal,
+   else undo inverts against a replaced graph. */
+static void flow__graph_reset(flow_t *f) {
+  for (int i = 0; i < f->nedges; i++) free(f->edges[i].label);
+  free(f->nodes); free(f->edges);
+  f->nodes = NULL; f->edges = NULL;
+  f->nnodes = f->capnodes = 0; f->nedges = f->capedges = 0;
+  f->nextid = 1; f->nexteid = 1;
 }
 void flow_resize(flow_t *f, int cols, int rows) {
   f->cols = cols; f->rows = rows; free(f->front);
