@@ -760,10 +760,13 @@ int flow_lod_for_zoom(flow_t *f, float zoom) { return flow__lod_for(f, zoom); }
 /* ===== edge routing: orthogonal step router via path-connectivity glyphs ===== */
 void flow_route_push(flow_route *r, int x, int y, uint32_t ch);
 void flow_route_orthogonal(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_route *out);
+void flow_route_straight(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_route *out);
 extern const flow_edge_type flow_default_edge_type;
+extern const flow_edge_type flow_straight_edge_type;  /* { "straight", flow_route_straight } */
 
 #ifdef FLOW_IMPLEMENTATION
-const flow_edge_type flow_default_edge_type = { "default", flow_route_orthogonal };
+const flow_edge_type flow_default_edge_type  = { "default",  flow_route_orthogonal };
+const flow_edge_type flow_straight_edge_type = { "straight", flow_route_straight };
 
 void flow_route_push(flow_route *r, int x, int y, uint32_t ch) {
   if (r->count >= r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->cells = (flow_route_cell*)realloc(r->cells, r->cap * sizeof *r->cells); }
@@ -819,6 +822,48 @@ void flow_route_orthogonal(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_
   }
   free(p);
 }
+/* STRAIGHT: direct integer-DDA line s->t, stepping the dominant axis by one cell
+   per step (diagonal steps allowed). Glyphs: ─ horizontal, │ vertical, ╲/╱ diagonal.
+   Arrowhead at the target end (same convention as orthogonal). label_anchor = midpoint.
+   Same heap/route-cell ownership as flow_route_orthogonal (caller frees out->cells). */
+void flow_route_straight(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_route *out) {
+  (void)sp; (void)tp;
+  int dx = t.x - s.x, dy = t.y - s.y;
+  int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+  int sx = dx > 0 ? 1 : dx < 0 ? -1 : 0, sy = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+  int N = adx > ady ? adx : ady;
+  if (N == 0) {                       /* degenerate s==t: exactly one cell */
+    flow_route_push(out, s.x, s.y, 0x2500);
+    out->label_anchor = s;
+    return;
+  }
+  int px = s.x, py = s.y;
+  for (int i = 0; i <= N; i++) {
+    int x = s.x + sx * ((adx * i + N / 2) / N);
+    int y = s.y + sy * ((ady * i + N / 2) / N);
+    uint32_t ch;
+    if (i == 0) ch = 0x2500;          /* provisional; fixed up from the next step */
+    else {
+      int ddx = x - px, ddy = y - py;
+      if (ddy == 0)      ch = 0x2500;                 /* ─ horizontal */
+      else if (ddx == 0) ch = 0x2502;                 /* │ vertical   */
+      else if ((ddx > 0) == (ddy > 0)) ch = 0x2572;   /* ╲ down-right / up-left */
+      else               ch = 0x2571;                 /* ╱ down-left / up-right */
+      out->cells[out->count - 1].ch = ch;             /* glyph of a cell = the step LEAVING it */
+    }
+    flow_route_push(out, x, y, ch);
+    px = x; py = y;
+  }
+  if (out->count > 0) {               /* arrowhead at the target end, by approach direction */
+    int ax, ay;
+    if (out->count >= 2) { ax = out->cells[out->count-1].x - out->cells[out->count-2].x;
+                           ay = out->cells[out->count-1].y - out->cells[out->count-2].y; }
+    else                 { ax = dx; ay = dy; }
+    uint32_t arrow = ax > 0 ? 0x25B6 : ax < 0 ? 0x25C0 : ay > 0 ? 0x25BC : 0x25B2;
+    out->cells[out->count - 1].ch = arrow;
+  }
+  out->label_anchor = (flow_pt){ (s.x + t.x) / 2, (s.y + t.y) / 2 };
+}
 #endif
 /* ===================== src/flow_types.h ===================== */
 /* ===== default node type (data = C-string label) + register-defaults ===== */
@@ -850,6 +895,7 @@ const flow_node_type flow_default_node_type = { "default", flow__default_measure
 void flow_register_defaults(flow_t *f) {
   flow_register_node_type(f, &flow_default_node_type);
   flow_register_edge_type(f, &flow_default_edge_type);
+  flow_register_edge_type(f, &flow_straight_edge_type);
 }
 #endif
 /* ===================== src/flow_render.h ===================== */

@@ -27,5 +27,6 @@ const flow_node_type flow_default_node_type = { "default", flow__default_measure
 void flow_register_defaults(flow_t *f) {
   flow_register_node_type(f, &flow_default_node_type);
   flow_register_edge_type(f, &flow_default_edge_type);
+  flow_register_edge_type(f, &flow_straight_edge_type);
 }
 #endif

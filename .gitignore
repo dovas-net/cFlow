@@ -1,17 +1,8 @@
 .DS_Store
+# compiled test binaries (keep the .c sources)
+tests/test_*
+!tests/test_*.c
+# compiled demo binaries (keep the .c sources)
 demos/hello_flow
-tests/test_smoke
-tests/test_geom
-tests/test_cell
-tests/test_model
-tests/test_route
-tests/test_render
-tests/test_input
-tests/test_mouse
-tests/test_select
-tests/test_marquee
-tests/test_keys
-tests/test_connect
-tests/test_edge
-tests/test_zoom
 demos/topo
+demos/flowchart

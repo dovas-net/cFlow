@@ -299,6 +299,41 @@ int main(void) {
     free(xb); flow_free(xf);
   }
 
+  /* straight edge type: A(10,5)->B(30,12) with type "straight" renders a direct
+     diagonal-stepped connector + arrowhead, distinct from the orthogonal golden. */
+  {
+    /* registration: orthogonal default + straight both resolve via flow_edge_type_for.
+       NOTE: flow_edge_type_for("") returns NULL by design — the empty->orthogonal
+       mapping lives at the render call site, so we probe the registered NAMES here. */
+    flow_t *rf = flow_new(10, 10); flow_register_defaults(rf);
+    const flow_edge_type *def = flow_edge_type_for(rf, "default");
+    const flow_edge_type *str = flow_edge_type_for(rf, "straight");
+    ASSERT(def != NULL, "orthogonal default edge type registered");
+    ASSERT(def && def->route == flow_route_orthogonal, "default resolves to orthogonal router");
+    ASSERT(str != NULL, "straight edge type registered");
+    ASSERT(str && str->route == flow_route_straight, "straight resolves to straight router");
+    flow_free(rf);
+
+    int wc = 40, wr = 18;
+    flow_cell *wb = (flow_cell*)malloc((size_t)wc * wr * sizeof(flow_cell));
+    flow_t *wf = flow_new(wc, wr); flow_register_defaults(wf);
+    int a = flow_add_node(wf, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(wf, "default", (flow_pt){30, 12}, (void*)"B");
+    int e = flow_add_edge(wf, a, b, "out", "in");
+    flow_edge *ep = flow_get_edge(wf, e);
+    snprintf(ep->type, sizeof ep->type, "%s", "straight");   /* no public setter; struct field, house style */
+    flow_render(wf, wb, wc, wr);
+    int arrow = 0, diag = 0;
+    for (int i = 0; i < wc * wr; i++) { uint32_t c = wb[i].ch;
+      if (c==0x25B6||c==0x25C0||c==0x25BC||c==0x25B2) arrow = 1;
+      if (c==0x2571 || c==0x2572) diag = 1; }
+    ASSERT(arrow, "straight edge renders an arrowhead");
+    ASSERT(diag, "straight edge renders diagonal ╱/╲ glyphs");
+    char *ws = cells_to_string(wb, wc, wr);
+    SNAPSHOT("render_straight_edge", ws); free(ws);
+    free(wb); flow_free(wf);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }
