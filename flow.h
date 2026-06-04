@@ -237,6 +237,10 @@ int  flow_is_ancestor(flow_t *f, int maybe_ancestor, int node);
 flow_rect flow_bounds(flow_t *f);
 int       flow_hit_node(flow_t *f, flow_pt screen);
 void      flow_pan(flow_t *f, int dx, int dy);
+/* extent clamps (xyflow nodeExtent / translateExtent, spec §6.1/§6.2) — both optional,
+   disabled by default (zero rect; w<=0 or h<=0 = disabled). Transient: not saved/journaled. */
+void flow_set_node_extent(flow_t *f, flow_rect world);      /* clamp flow_move_node targets so the node rect stays inside `world` (flush to the exceeded edge); applies to FUTURE moves only */
+void flow_set_translate_extent(flow_t *f, flow_rect world); /* clamp pan/zoom/fit so the VISIBLE world window stays inside `world`; re-clamps the current view immediately (precedent: flow_set_zoom_limits) */
 flow_pt   flow_to_screen(flow_t *f, flow_pt world_abs);
 flow_pt   flow_to_world(flow_t *f, flow_pt screen);
 flow_viewport flow_view_get(flow_t *f);
@@ -377,6 +381,7 @@ struct flow {
   const flow_node_type **ntypes; int nntypes;
   const flow_edge_type **etypes; int netypes;
   flow_viewport view; float zmin, zmax; int cols, rows; flow_cell *front; int running;
+  flow_rect node_extent, translate_extent;  /* optional world-space clamps (spec §6.1/§6.2); zero rect = disabled (calloc default) */
   int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
@@ -631,12 +636,44 @@ int flow_add_node(flow_t *f, const char *type, flow_pt pos, void *data) {
   if (flow__rec_gate(f)) flow__rec_add_node(f, nid);
   return nid;
 }
+/* ---- extent clamps (xyflow nodeExtent / translateExtent, spec §6.1/§6.2) ---- */
+void flow_set_node_extent(flow_t *f, flow_rect world) { f->node_extent = world; }
+/* Clamp f->view.ox/oy IN PLACE so the visible world window stays inside translate_extent.
+   From flow_project (screen = world·z + o): the window spans world [−o/z, (screen−o)/z],
+   so the o clamp range is [screen_extent − (e.x+e.w)·z, −e.x·z] — LARGER world x needs
+   SMALLER ox (flow_feed's right-arrow pans (-1,0) for the same reason). When the window
+   is BIGGER than the extent on an axis the range inverts (lo > hi): pin to the midpoint,
+   which centers the extent in the window (d3-zoom translateExtent convention) — pans
+   become no-ops on that axis until zoom-in shrinks the window. Per-axis independent. */
+static void flow__clamp_view_offset(flow_t *f) {
+  flow_rect e = f->translate_extent;
+  if (e.w <= 0 || e.h <= 0) return;                     /* disabled (zero-init default) */
+  float z = f->view.zoom == 0.0f ? 1.0f : f->view.zoom;
+  float lo = (float)f->cols - (float)(e.x + e.w) * z, hi = -(float)e.x * z;
+  f->view.ox = lo > hi ? (lo + hi) / 2.0f : (f->view.ox < lo ? lo : (f->view.ox > hi ? hi : f->view.ox));
+  lo = (float)f->rows - (float)(e.y + e.h) * z; hi = -(float)e.y * z;
+  f->view.oy = lo > hi ? (lo + hi) / 2.0f : (f->view.oy < lo ? lo : (f->view.oy > hi ? hi : f->view.oy));
+}
+void flow_set_translate_extent(flow_t *f, flow_rect world) {
+  f->translate_extent = world;
+  flow__clamp_view_offset(f);   /* re-clamp the live view immediately (precedent: flow_set_zoom_limits re-clamps zoom) */
+}
 void flow_move_node(flow_t *f, int id, flow_pt pos) {
   /* ABSOLUTE-in contract: `pos` is a world-absolute target. Store it parent-relative so
      a child stays under the cursor. For top-level nodes (parent==-1) parent_abs=={0,0},
      so n->pos == pos — byte-identical to the pre-groups behaviour for every existing caller. */
   flow_node *n = flow_get_node(f, id);
   if (!n) return;
+  /* node-extent clamp (absolute world space) BEFORE journaling, so undo/redo replay the
+     CLAMPED target (flow__rec_move records `pos`). Max edge first, then min edge: a node
+     LARGER than the extent lands flush to the min edge (deterministic, no oscillation). */
+  if (f->node_extent.w > 0 && f->node_extent.h > 0) {
+    flow_rect e = f->node_extent;
+    if (pos.x + n->w > e.x + e.w) pos.x = e.x + e.w - n->w;
+    if (pos.x < e.x) pos.x = e.x;
+    if (pos.y + n->h > e.y + e.h) pos.y = e.y + e.h - n->h;
+    if (pos.y < e.y) pos.y = e.y;
+  }
   if (flow__rec_gate(f)) flow__rec_move(f, id, flow_node_abs(f, n), pos);  /* MOVE journals ABSOLUTE coords */
   flow_pt pa = { 0, 0 };
   if (n->parent != -1) { flow_node *p = flow_get_node(f, n->parent); if (p) pa = flow_node_abs(f, p); }
@@ -809,7 +846,7 @@ int flow_hit_node(flow_t *f, flow_pt screen) {
   free(order);
   return hit;
 }
-void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; }
+void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; flow__clamp_view_offset(f); }
 flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->view, world_abs); }
 flow_pt flow_to_world(flow_t *f, flow_pt screen) { return flow_unproject(f->view, screen); }
 flow_viewport flow_view_get(flow_t *f) { return f->view; }
@@ -1047,6 +1084,7 @@ void flow_fit_view(flow_t *f, int margin) {
   f->view.zoom = z;
   f->view.ox = f->cols / 2.0f - (b.x + b.w / 2.0f) * z;
   f->view.oy = f->rows / 2.0f - (b.y + b.h / 2.0f) * z;
+  flow__clamp_view_offset(f);                                 /* translate_extent wins over centering */
 }
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_set_autopan(flow_t *f, int margin, int speed) {
@@ -1389,6 +1427,7 @@ void flow_set_zoom(flow_t *f, float zoom, flow_pt screen_center) {
   f->view.ox = screen_center.x - wx * z1;
   f->view.oy = screen_center.y - wy * z1;
   f->view.zoom = z1;
+  flow__clamp_view_offset(f);   /* translate_extent clamp AFTER the zoom write (zoom-aware range) */
 }
 void flow_zoom_in(flow_t *f, flow_pt screen_center)  { flow_set_zoom(f, f->view.zoom * FLOW_ZOOM_STEP, screen_center); }
 void flow_zoom_out(flow_t *f, flow_pt screen_center) { flow_set_zoom(f, f->view.zoom / FLOW_ZOOM_STEP, screen_center); }

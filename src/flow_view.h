@@ -26,6 +26,7 @@ void flow_set_zoom(flow_t *f, float zoom, flow_pt screen_center) {
   f->view.ox = screen_center.x - wx * z1;
   f->view.oy = screen_center.y - wy * z1;
   f->view.zoom = z1;
+  flow__clamp_view_offset(f);   /* translate_extent clamp AFTER the zoom write (zoom-aware range) */
 }
 void flow_zoom_in(flow_t *f, flow_pt screen_center)  { flow_set_zoom(f, f->view.zoom * FLOW_ZOOM_STEP, screen_center); }
 void flow_zoom_out(flow_t *f, flow_pt screen_center) { flow_set_zoom(f, f->view.zoom / FLOW_ZOOM_STEP, screen_center); }
