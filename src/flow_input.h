@@ -48,11 +48,12 @@ static void flow__resolve_connection_at(flow_t *f, flow_pt scr) {
   }
 }
 /* event-driven auto-pan (spec §8, model A): ONE autopan_speed step per motion event
-   while an OBJECT drag (node / connection / reconnect) has the cursor within
-   autopan_margin cells of a buffer edge, panning toward that edge so off-screen
-   targets scroll into reach. A terminal delivers no events for a stationary cursor,
-   so this only advances while the mouse keeps moving (the run-loop-ticked model is a
-   documented follow-up). Callers gate: pane-pan and marquee drags never auto-pan.
+   while an OBJECT drag (node / connection / reconnect / marquee) has the cursor
+   within autopan_margin cells of a buffer edge, panning toward that edge so
+   off-screen targets scroll into reach. A terminal delivers no events for a
+   stationary cursor, so this only advances while the mouse keeps moving (the
+   run-loop-ticked model is a documented follow-up). Callers gate: pane-pan drags
+   never auto-pan (marquee drags auto-pan as of increment 4).
    An axis whose margin bands would overlap (2*margin >= extent) is skipped — defense
    for tiny buffers, where "near the edge" loses meaning. */
 static void flow__autopan(flow_t *f, flow_pt scr) {
@@ -181,6 +182,10 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       }
     }
     if (f->marquee_on) {                          /* live marquee: replace-select within the box */
+      /* pan FIRST, then re-select at post-pan world coords (same order as node-drag):
+         the rect below is recomputed from the NEW view, so the marquee chases the
+         screen-coordinate anchor as the world scrolls and the selection tracks it. */
+      flow__autopan(f, scr);
       f->marquee_cur = scr;
       flow_pt wa = flow_to_world(f, f->marquee_anchor), wc = flow_to_world(f, scr);
       flow_rect wr = { wa.x < wc.x ? wa.x : wc.x, wa.y < wc.y ? wa.y : wc.y,

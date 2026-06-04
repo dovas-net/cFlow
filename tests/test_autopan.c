@@ -4,9 +4,10 @@
 
 /* Auto-pan near viewport edge during drags (work package #6, spec §8).
    Event-driven model A: ONE autopan_speed step per motion event while an OBJECT drag
-   (node-drag, connection-drag, reconnect-drag) has the cursor within autopan_margin
-   cells of a buffer edge. Pane-pan and marquee drags are excluded. The pan is applied
-   BEFORE the drag re-places its object, so the object stays under the cursor.
+   (node-drag, connection-drag, reconnect-drag, marquee as of increment 4) has the
+   cursor within autopan_margin cells of a buffer edge. Pane-pan drags are excluded.
+   The pan is applied BEFORE the drag re-places its object, so the object stays under
+   the cursor (marquee: the rect is recomputed at post-pan world coords each motion).
    An axis whose margin bands would overlap (2*margin >= extent) never auto-pans. */
 
 static void feed(flow_t *f, const char *s) { flow_feed(f, s, (int)strlen(s)); }
@@ -127,15 +128,45 @@ int main(void) {
     flow_free(f);
   }
 
-  /* ---- marquee drag near the edge does NOT auto-pan ---- */
+  /* ---- marquee drag near the edge DOES auto-pan (increment-4 contract INVERSION:
+          this block previously asserted the offsets stayed unchanged) ---- */
   {
     flow_t *f = flow_new(80, 24); flow_register_defaults(f);
     flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
     flow_pt o0 = org(f);
     press_shift_at(f, 50, 10); move_shift_to(f, 79, 22);  /* into the bottom-right bands */
-    ASSERT_INT(org(f).x, o0.x, "marquee near edge: x offset unchanged");
-    ASSERT_INT(org(f).y, o0.y, "marquee near edge: y offset unchanged");
+    ASSERT_INT(org(f).x, o0.x - 2, "marquee near right edge: x DOES auto-pan (-2)");
+    ASSERT_INT(org(f).y, o0.y - 2, "marquee near bottom edge: y DOES auto-pan (-2)");
     release_at(f, 79, 22);
+    flow_free(f);
+  }
+
+  /* ---- marquee pan stability: interior motion after an edge pan does not reverse it ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_pt o0 = org(f);
+    press_shift_at(f, 50, 10); move_shift_to(f, 79, 22);  /* edge bands: pan fires */
+    int dpx = o0.x - org(f).x, dpy = o0.y - org(f).y;     /* record the pan delta */
+    ASSERT_INT(dpx, 2, "stability precondition: x panned by speed");
+    ASSERT_INT(dpy, 2, "stability precondition: y panned by speed");
+    move_shift_to(f, 60, 15);                             /* interior: no further pan */
+    ASSERT_INT(org(f).x, o0.x - dpx, "interior marquee motion keeps the pan (x stable)");
+    ASSERT_INT(org(f).y, o0.y - dpy, "interior marquee motion keeps the pan (y stable)");
+    release_at(f, 60, 15);
+    flow_free(f);
+  }
+
+  /* ---- marquee on a degenerate axis: dead axis stays dead, live axis pans ---- */
+  {
+    flow_t *f = flow_new(24, 6); flow_register_defaults(f);  /* rows 6: 2*3 >= 6 -> y dead */
+    flow_add_node(f, "default", (flow_pt){5, 2}, (void*)"A"); /* rect (5,2,5,3) */
+    flow_pt o0 = org(f);
+    press_shift_at(f, 15, 3);                 /* empty cell: arm marquee */
+    move_shift_to(f, 1, 1);                   /* x in LEFT band (alive); y in top band (dead) */
+    ASSERT_INT(org(f).x, o0.x + 2, "marquee: x-axis auto-pans on the small buffer");
+    ASSERT_INT(org(f).y, o0.y,     "marquee: y-axis stays dead (bands overlap)");
+    release_at(f, 1, 1);
     flow_free(f);
   }
 
