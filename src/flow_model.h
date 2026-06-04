@@ -1,5 +1,8 @@
 /* ===== model: engine, nodes, edges, vtable types, transform, bounds, hit-test ===== */
-enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u };
+enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_EXTENT_PARENT = 16u };
+/* NOTE: the `hidden` package also edits this enum line (FLOW_HIDDEN = 8u) — mutual
+   conflict resolved by both appending distinct flag bits. FLOW_EXTENT_PARENT gates
+   flow_move_node's child-inside-parent clamp; set/clear directly on n->flags. */
 
 /* zoom constants (used by flow_model, flow_view, flow_render, flow_types — all at/after flow_model) */
 #define FLOW_ZOOM_MIN      0.25f   /* default lower clamp */
@@ -502,6 +505,20 @@ void flow_move_node(flow_t *f, int id, flow_pt pos) {
     if (pos.x < e.x) pos.x = e.x;
     if (pos.y + n->h > e.y + e.h) pos.y = e.y + e.h - n->h;
     if (pos.y < e.y) pos.y = e.y;
+  }
+  /* parent-extent clamp (FLOW_EXTENT_PARENT, spec §9 extent:'parent'): keep the child
+     rect inside the parent's absolute rect. Applied AFTER the node-extent clamp (pinned
+     order — with disjoint ranges the parent wins) and, like it, BEFORE journaling.
+     Layouts commit through this function, so they inherit the clamp transparently. */
+  if ((n->flags & FLOW_EXTENT_PARENT) && n->parent != -1) {
+    flow_node *pp = flow_get_node(f, n->parent);
+    if (pp) {
+      flow_rect pr = flow_node_rect_abs(f, pp);
+      if (pos.x + n->w > pr.x + pr.w) pos.x = pr.x + pr.w - n->w;
+      if (pos.x < pr.x) pos.x = pr.x;
+      if (pos.y + n->h > pr.y + pr.h) pos.y = pr.y + pr.h - n->h;
+      if (pos.y < pr.y) pos.y = pr.y;
+    }
   }
   if (flow__rec_gate(f)) flow__rec_move(f, id, flow_node_abs(f, n), pos);  /* MOVE journals ABSOLUTE coords */
   flow_pt pa = { 0, 0 };

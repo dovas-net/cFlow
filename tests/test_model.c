@@ -91,5 +91,76 @@ int main(void) {
     flow_free(h);
   }
 
+  /* ---- FLOW_EXTENT_PARENT: child clamps inside its parent's absolute rect ---- */
+  {
+    flow_t *g = flow_new(80, 24); flow_register_defaults(g);
+    int p = flow_add_node(g, "default", (flow_pt){10, 10}, (void*)"P");
+    flow_node *pn = flow_get_node(g, p); pn->w = 30; pn->h = 20;     /* parent rect (10,10,30,20) */
+    int c = flow_add_node(g, "default", (flow_pt){15, 15}, (void*)"C");
+    flow_node *cn = flow_get_node(g, c); cn->w = 4; cn->h = 3;
+    flow_set_parent(g, c, p);                                        /* abs preserved: rel (5,5) */
+    flow_get_node(g, c)->flags |= FLOW_EXTENT_PARENT;
+    flow_move_node(g, c, (flow_pt){20, 28});                         /* y would span to 31 > 30 */
+    flow_pt a2 = flow_node_abs(g, flow_get_node(g, c));
+    ASSERT_INT(a2.x, 20, "parent-extent: x in bounds, untouched");
+    ASSERT_INT(a2.y, 27, "parent-extent bottom: y flush so 27+3==30");
+    flow_move_node(g, c, (flow_pt){38, 15});                         /* x would span to 42 > 40 */
+    a2 = flow_node_abs(g, flow_get_node(g, c));
+    ASSERT_INT(a2.x, 36, "parent-extent right: x flush so 36+4==40");
+    flow_move_node(g, c, (flow_pt){2, 2});                           /* top-left overflow */
+    a2 = flow_node_abs(g, flow_get_node(g, c));
+    ASSERT_INT(a2.x, 10, "parent-extent left: flush to parent.x");
+    ASSERT_INT(a2.y, 10, "parent-extent top: flush to parent.y");
+    flow_move_node(g, c, (flow_pt){50, 50});                         /* bottom-right corner */
+    a2 = flow_node_abs(g, flow_get_node(g, c));
+    ASSERT_INT(a2.x, 36, "corner overflow: x flush right");
+    ASSERT_INT(a2.y, 27, "corner overflow: y flush bottom");
+    flow_move_node(g, c, (flow_pt){12, 12});                         /* interior: untouched */
+    a2 = flow_node_abs(g, flow_get_node(g, c));
+    ASSERT_INT(a2.x, 12, "interior: x unclamped");
+    ASSERT_INT(a2.y, 12, "interior: y unclamped");
+    /* flag OFF -> unclamped */
+    flow_get_node(g, c)->flags &= ~(unsigned)FLOW_EXTENT_PARENT;
+    flow_move_node(g, c, (flow_pt){50, 50});
+    a2 = flow_node_abs(g, flow_get_node(g, c));
+    ASSERT_INT(a2.x, 50, "flag off: x unclamped");
+    /* flag on an UNPARENTED node -> no clamp (parent==-1 guard) */
+    int u = flow_add_node(g, "default", (flow_pt){0, 0}, (void*)"U");
+    flow_get_node(g, u)->flags |= FLOW_EXTENT_PARENT;
+    flow_move_node(g, u, (flow_pt){500, 500});
+    ASSERT_INT(flow_get_node(g, u)->pos.x, 500, "unparented: no clamp");
+    /* ordering: node-extent FIRST, parent-extent SECOND. Disjoint ranges discriminate:
+       node-extent caps x<=8 (12-4), parent demands x>=10 -> last-applied (parent) wins. */
+    flow_get_node(g, c)->flags |= FLOW_EXTENT_PARENT;
+    flow_set_node_extent(g, (flow_rect){0, 0, 12, 100});
+    flow_move_node(g, c, (flow_pt){50, 15});
+    a2 = flow_node_abs(g, flow_get_node(g, c));
+    ASSERT_INT(a2.x, 10, "disjoint extents: parent clamp applied AFTER node extent (wins)");
+    flow_set_node_extent(g, (flow_rect){0, 0, 0, 0});
+    flow_free(g);
+  }
+
+  /* ---- FLOW_EXTENT_PARENT x flow_layout: layout commits respect the clamp ---- */
+  {
+    flow_t *g = flow_new(80, 24); flow_register_defaults(g);
+    int p = flow_add_node(g, "group", (flow_pt){10, 10}, NULL);      /* group measure preserves w/h */
+    flow_node *pn = flow_get_node(g, p); pn->w = 8; pn->h = 8;
+    int c1 = flow_add_node(g, "default", (flow_pt){11, 11}, (void*)"a");
+    int c2 = flow_add_node(g, "default", (flow_pt){12, 12}, (void*)"b");
+    flow_set_parent(g, c1, p); flow_set_parent(g, c2, p);
+    flow_get_node(g, c1)->flags |= FLOW_EXTENT_PARENT;
+    flow_get_node(g, c2)->flags |= FLOW_EXTENT_PARENT;
+    flow_layout_opts lo = {0};
+    flow_layout(g, lo);                                              /* 5x3 children spread > 8x8 unclamped */
+    flow_rect pr = flow_node_rect_abs(g, flow_get_node(g, p));
+    flow_rect r1 = flow_node_rect_abs(g, flow_get_node(g, c1));
+    flow_rect r2 = flow_node_rect_abs(g, flow_get_node(g, c2));
+    ASSERT(r1.x >= pr.x && r1.y >= pr.y && r1.x + r1.w <= pr.x + pr.w && r1.y + r1.h <= pr.y + pr.h,
+           "layout: child 1 clamped inside the container");
+    ASSERT(r2.x >= pr.x && r2.y >= pr.y && r2.x + r2.w <= pr.x + pr.w && r2.y + r2.h <= pr.y + pr.h,
+           "layout: child 2 clamped inside the container");
+    flow_free(g);
+  }
+
   return flowtest_report("test_model");
 }
