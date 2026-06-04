@@ -197,5 +197,22 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- MODEL-level layering (#11 landed): hidden elements STAY in the queries ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){0, 0},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){20, 0}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_set_node_hidden(f, a, 1);
+    flow_set_edge_hidden(f, e, 1);
+    int out[4];
+    ASSERT_INT(flow_incomers(f, b, out, 4), 1, "hidden source still counted as an incomer");
+    ASSERT_INT(out[0], a, "  the hidden node id");
+    ASSERT_INT(flow_connected_edges(f, b, out, 4), 1, "hidden edge still in connected_edges");
+    ASSERT_INT(flow_intersecting_nodes(f, (flow_rect){0, 0, 60, 24}, out, 4), 2,
+               "region query still sweeps the hidden node (view-skip does not apply)");
+    flow_free(f);
+  }
+
   return flowtest_report("test_query");
 }

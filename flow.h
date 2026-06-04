@@ -170,10 +170,12 @@ char *flow_diff_emit(const flow_cell *front, const flow_cell *back, int cols, in
 #endif
 /* ===================== src/flow_model.h ===================== */
 /* ===== model: engine, nodes, edges, vtable types, transform, bounds, hit-test ===== */
-enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_EXTENT_PARENT = 16u };
-/* NOTE: the `hidden` package also edits this enum line (FLOW_HIDDEN = 8u) — mutual
-   conflict resolved by both appending distinct flag bits. FLOW_EXTENT_PARENT gates
-   flow_move_node's child-inside-parent clamp; set/clear directly on n->flags. */
+enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 8u, FLOW_EXTENT_PARENT = 16u };
+/* FLOW_EXTENT_PARENT gates flow_move_node's child-inside-parent clamp; set/clear
+   directly on n->flags. FLOW_HIDDEN is a VIEW-level skip (render, hit, marquee,
+   bounds, minimap, handles) set via flow_set_node_hidden / flow_set_edge_hidden;
+   MODEL-level ops (traversal/intersect queries, layout, serialize) still include
+   hidden elements. Neither flag is journaled or persisted. */
 
 /* zoom constants (used by flow_model, flow_view, flow_render, flow_types — all at/after flow_model) */
 #define FLOW_ZOOM_MIN      0.25f   /* default lower clamp */
@@ -313,6 +315,15 @@ void flow_delete_selection(flow_t *f);     /* built-in: remove selected node(s) 
 int  flow_add_node_center(flow_t *f, const char *type, void *data); /* add at world point under viewport center; returns id */
 void flow_fit_view(flow_t *f, int margin); /* getViewportForBounds: pick zoom+pan so flow_bounds fits with `margin` cells of padding (zoom clamped to [zmin,zmax]); no-op when empty */
 void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom help/status line */
+/* hidden flags (inc-4 #11) — VIEW-level visibility, MODEL-level presence. A hidden
+   node is skipped by render, hit-tests, marquee selection, bounds/fit and the
+   minimap; traversal/intersect queries, layout and serialize still see it. A hidden
+   edge — or any edge with a hidden endpoint (cascade) — is skipped by render and
+   hit-test. Hiding a SELECTED node deselects it (sig-gated on_selection_change);
+   un-hiding does NOT reselect. NOT journaled (UI-transient, like zoom) and NOT
+   persisted in v1: flags reload as 0, so saved-hidden elements come back visible. */
+void flow_set_node_hidden(flow_t *f, int id, int hidden);
+void flow_set_edge_hidden(flow_t *f, int id, int hidden);
 void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-pan band (defaults 3/2): margin = band width in cells, speed = step per motion event; negatives clamp to 0, margin 0 disables */
 
 /* ---- undo/redo: capped inverse-op command journal (spec §11) ----
@@ -845,10 +856,27 @@ flow_pt flow_node_abs(flow_t *f, const flow_node *n) {
   return p;
 }
 flow_rect flow_node_rect_abs(flow_t *f, const flow_node *n) { flow_pt a = flow_node_abs(f, n); flow_rect r = { a.x, a.y, n->w, n->h }; return r; }
+/* THE hidden choke points (inc-4 #11). All view-layer skip logic gates through these
+   two so render, hit-tests, marquee, bounds and the minimap can never drift apart
+   (the flow__node_footprint precedent). Edges cascade: an edge is invisible when ITS
+   flag is set OR either endpoint node is hidden. */
+static int flow__node_visible(flow_t *f, const flow_node *n) { (void)f; return !(n->flags & FLOW_HIDDEN); }
+static int flow__edge_visible(flow_t *f, const flow_edge *e) {
+  if (e->flags & FLOW_HIDDEN) return 0;
+  flow_node *sn = flow_get_node(f, e->source), *tn = flow_get_node(f, e->target);
+  if (sn && !flow__node_visible(f, sn)) return 0;
+  if (tn && !flow__node_visible(f, tn)) return 0;
+  return 1;
+}
 flow_rect flow_bounds(flow_t *f) {
-  if (f->nnodes == 0) { flow_rect z = {0,0,0,0}; return z; }
-  flow_rect b = flow_node_rect_abs(f, &f->nodes[0]);
-  for (int i = 1; i < f->nnodes; i++) b = flow_rect_union(b, flow_node_rect_abs(f, &f->nodes[i]));
+  /* union of VISIBLE node rects (hidden are view-skipped); zero rect when the graph
+     is empty OR fully hidden — flow_fit_view's existing w<=0 guard makes that a no-op */
+  flow_rect b = {0,0,0,0}; int seeded = 0;
+  for (int i = 0; i < f->nnodes; i++) {
+    if (!flow__node_visible(f, &f->nodes[i])) continue;
+    flow_rect r = flow_node_rect_abs(f, &f->nodes[i]);
+    b = seeded ? flow_rect_union(b, r) : r; seeded = 1;
+  }
   return b;
 }
 /* Shared level-of-detail + footprint helpers. BOTH flow_hit_node and the render node
@@ -907,6 +935,7 @@ int flow_hit_node(flow_t *f, flow_pt screen) {
   int hit = -1;
   for (int k = 0; k < f->nnodes; k++) {
     flow_node *n = &f->nodes[order ? order[k] : k];
+    if (!flow__node_visible(f, n)) continue;          /* hidden: not hittable (same gate as render) */
     flow_rect sr = flow__node_footprint(f, n, lod);   /* exact footprint the renderer draws */
     if (flow_rect_contains(sr, screen)) { hit = n->id; break; }
   }
@@ -983,6 +1012,7 @@ int flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int a
   int c = 0;
   for (int i = 0; i < f->nnodes; i++) {
     flow_node *n = &f->nodes[i];
+    if (!flow__node_visible(f, n)) continue;            /* marquee is VIEW-level: hidden nodes are not selectable */
     flow_rect nr = flow_node_rect_abs(f, n);            /* world rect; compared against the world-space marquee (caller unprojects) */
     int hit;
     if (mode == FLOW_SELECT_FULL) {                     /* node fully inside marquee */
@@ -1157,6 +1187,32 @@ void flow_fit_view(flow_t *f, int margin) {
 void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void *user) {
   f->validator_fn = fn; f->validator_user = user;   /* NULL fn = allow all (default) */
 }
+void flow_set_node_hidden(flow_t *f, int id, int hidden) {
+  flow_node *n = flow_get_node(f, id);
+  if (!n) return;
+  if (hidden) {
+    unsigned long sig = flow__sel_sig(f);
+    n->flags |= FLOW_HIDDEN;
+    if (n->flags & FLOW_SELECTED) {                 /* hide deselects: no invisible selection
+                                                       (Delete would silently remove it) */
+      n->flags &= ~(unsigned)FLOW_SELECTED;
+      flow__notify_selection(f, sig);               /* sig-gated: fires once, only on change */
+    }
+  } else {
+    n->flags &= ~(unsigned)FLOW_HIDDEN;             /* showing does NOT reselect (hide discards state) */
+  }
+}
+void flow_set_edge_hidden(flow_t *f, int id, int hidden) {
+  flow_edge *e = flow_get_edge(f, id);
+  if (!e) return;
+  if (hidden) {
+    e->flags |= FLOW_HIDDEN;
+    e->flags &= ~(unsigned)FLOW_SELECTED;           /* same no-invisible-selection rule as nodes;
+                                                       no event — flow__sel_sig hashes nodes only */
+  } else {
+    e->flags &= ~(unsigned)FLOW_HIDDEN;
+  }
+}
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_set_autopan(flow_t *f, int margin, int speed) {
   f->autopan_margin = margin < 0 ? 0 : margin;   /* 0 = no band = disabled */
@@ -1234,6 +1290,7 @@ static flow_pt flow__handle_screen(flow_t *f, const flow_node *n, const flow_han
   flow_pt s = { fp.x + ox, fp.y + oy }; return s;
 }
 static int flow__node_handles_visible(flow_t *f, const flow_node *n) {
+  if (!flow__node_visible(f, n)) return 0;   /* hidden nodes never show handle markers */
   return (n->flags & (FLOW_HOVERED | FLOW_SELECTED)) || n->id == f->conn_node;
 }
 int flow_hit_handle(flow_t *f, flow_pt screen, int *out_node) {
@@ -2150,7 +2207,9 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
   for (int x = vx; x <= vx2; x++) { flow_put(&s, 1+x, 1+vy, 0x2500, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+x, 1+vy2, 0x2500, FLOW_FG, FLOW_BG, 0); }
   for (int y = vy; y <= vy2; y++) { flow_put(&s, 1+vx, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+vx2, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); }
   for (int i = 0; i < f->nnodes; i++) {
-    flow_node *n = &f->nodes[i]; flow_pt a = flow_node_abs(f, n);
+    flow_node *n = &f->nodes[i];
+    if (!flow__node_visible(f, n)) continue;     /* hidden nodes get no minimap dot */
+    flow_pt a = flow_node_abs(f, n);
     int cx = a.x + n->w / 2, cy = a.y + n->h / 2;
     int mx = (cx - W.x) * iw / W.w, my = (cy - W.y) * ih / W.h;
     if (mx < 0) mx = 0; if (mx > iw - 1) mx = iw - 1;
@@ -2213,6 +2272,7 @@ int flow_edge_endpoint_screen(flow_t *f, const flow_edge *e, int which, flow_pt 
 int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
   for (int i = flow_edge_count(f) - 1; i >= 0; i--) {         /* topmost first (reverse, like flow_hit_node) */
     flow_edge *e = &flow_edges(f)[i];
+    if (!flow__edge_visible(f, e)) continue;                  /* hidden / cascaded: not hittable */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
@@ -2262,6 +2322,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
      hit-test (flow_hit_edge) and this draw can never drift apart. */
   for (int i = 0; i < flow_edge_count(f); i++) {
     flow_edge *e = &flow_edges(f)[i];
+    if (!flow__edge_visible(f, e)) continue;   /* hidden edge OR hidden endpoint (cascade) */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
@@ -2290,6 +2351,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     int *order = flow__node_order(f, 1);
     for (int k = 0; k < flow_node_count(f); k++) {
       flow_node *n = &flow_nodes(f)[order ? order[k] : k];
+      if (!flow__node_visible(f, n)) continue;   /* same gate as flow_hit_node */
       flow_rect wr = flow_node_rect_abs(f, n);
       flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
       const flow_node_type *nt = flow_node_type_for(f, n->type);

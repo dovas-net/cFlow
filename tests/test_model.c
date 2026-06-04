@@ -7,6 +7,10 @@ static void m_measure(const flow_node *n, int *w, int *h) { (void)n; *w = 4; *h 
 static void m_render(const flow_node *n, flow_surface *s, flow_render_ctx c) { (void)n;(void)s;(void)c; }
 static const flow_node_type M = { "box", m_measure, m_render, NULL, 0 };
 
+/* hidden x selection (inc-4 #11) */
+static int mh_sel_fires = 0;
+static void mh_on_sel(flow_t *f, const int *ids, int n, void *u) { (void)f;(void)ids;(void)n;(void)u; mh_sel_fires++; }
+
 int main(void) {
   flow_t *f = flow_new(80, 24);
   flow_register_node_type(f, &M);
@@ -159,6 +163,73 @@ int main(void) {
            "layout: child 1 clamped inside the container");
     ASSERT(r2.x >= pr.x && r2.y >= pr.y && r2.x + r2.w <= pr.x + pr.w && r2.y + r2.h <= pr.y + pr.h,
            "layout: child 2 clamped inside the container");
+    flow_free(g);
+  }
+
+  /* ---- FLOW_HIDDEN: view-level skip for hit/bounds/handles; sig-gated deselect ---- */
+  {
+    flow_t *g = flow_new(80, 24); flow_register_defaults(g);
+    int a = flow_add_node(g, "default", (flow_pt){10, 5}, (void*)"A");   /* rect (10,5,5,3) */
+    int b = flow_add_node(g, "default", (flow_pt){30, 5}, (void*)"B");
+    int steps = g->journal.n;
+
+    /* hit-test skip */
+    ASSERT_INT(flow_hit_node(g, (flow_pt){12, 6}), a, "precondition: A hittable");
+    flow_set_node_hidden(g, a, 1);
+    ASSERT_INT(flow_hit_node(g, (flow_pt){12, 6}), -1, "hidden A is not hittable");
+    ASSERT_INT(g->journal.n, steps, "hide journals nothing (UI-transient, like zoom)");
+
+    /* bounds exclude hidden; all-hidden -> zero rect; fit_view no-ops on it */
+    flow_rect bb = flow_bounds(g);
+    ASSERT_INT(bb.x, 30, "bounds exclude hidden A (left edge is B's)");
+    flow_set_node_hidden(g, b, 1);
+    bb = flow_bounds(g);
+    ASSERT(bb.w == 0 && bb.h == 0, "all hidden: bounds is the zero rect");
+    float ox0 = g->view.ox;
+    flow_fit_view(g, 2);
+    ASSERT(g->view.ox == ox0, "fit_view no-ops on zero bounds (existing guard)");
+    flow_set_node_hidden(g, b, 0);
+
+    /* un-hide restores hittability */
+    flow_set_node_hidden(g, a, 0);
+    ASSERT_INT(flow_hit_node(g, (flow_pt){12, 6}), a, "un-hidden A hittable again");
+
+    /* handles gate: hovered but hidden -> no handle hit, even though hover reveals */
+    flow_set_hover(g, a);
+    int hn = -2;
+    ASSERT(flow_hit_handle(g, (flow_pt){14, 6}, &hn) >= 0, "precondition: hovered A's handle hittable");
+    flow_set_node_hidden(g, a, 1);
+    ASSERT_INT(flow_hit_handle(g, (flow_pt){14, 6}, &hn), -1, "hidden node's handles are not hittable");
+    flow_set_node_hidden(g, a, 0);
+
+    /* missing id: graceful no-op */
+    flow_set_node_hidden(g, 9999, 1);
+    flow_set_edge_hidden(g, 9999, 1);
+    ASSERT(1, "missing ids: setters are no-ops, no crash");
+    flow_free(g);
+  }
+
+  /* ---- FLOW_HIDDEN x selection: hiding a selected node deselects, sig-gated ---- */
+  {
+    flow_t *g = flow_new(80, 24); flow_register_defaults(g);
+    int a = flow_add_node(g, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(g, "default", (flow_pt){30, 5}, (void*)"B");
+    flow_callbacks cb = {0}; cb.on_selection_change = mh_on_sel; cb.user = NULL;
+    flow_set_callbacks(g, cb);
+    flow_select_node(g, a, 0); flow_select_node(g, b, 1);
+    mh_sel_fires = 0;
+    flow_set_node_hidden(g, a, 1);
+    ASSERT_INT(flow_selected_count(g), 1, "hiding selected A deselects it (B remains)");
+    ASSERT_INT(mh_sel_fires, 1, "on_selection_change fired once for the hide-deselect");
+    flow_set_node_hidden(g, a, 1);                     /* idempotent re-hide */
+    ASSERT_INT(mh_sel_fires, 1, "re-hiding fires nothing (selection unchanged)");
+    flow_set_node_hidden(g, a, 0);
+    ASSERT_INT(flow_selected_count(g), 1, "un-hiding does NOT reselect (hide discards state)");
+    ASSERT_INT(mh_sel_fires, 1, "un-hide fires no selection event");
+    /* hiding an UNselected node never fires */
+    int c = flow_add_node(g, "default", (flow_pt){50, 5}, (void*)"C");
+    flow_set_node_hidden(g, c, 1);
+    ASSERT_INT(mh_sel_fires, 1, "hiding an unselected node fires nothing");
     flow_free(g);
   }
 

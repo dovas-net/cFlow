@@ -304,5 +304,41 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- FLOW_HIDDEN edges: own flag + endpoint cascade gate hit-testing (inc-4 #11) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_pt sp, tp;
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e), 0, &sp);
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e), 1, &tp);
+    flow_pt mid = { (sp.x + tp.x) / 2, (sp.y + tp.y) / 2 };
+    ASSERT_INT(flow_hit_edge(f, mid, 0), e, "precondition: edge hittable at mid-path");
+    /* own flag */
+    flow_set_edge_hidden(f, e, 1);
+    ASSERT_INT(flow_hit_edge(f, mid, 0), -1, "hidden edge is not hittable");
+    flow_set_edge_hidden(f, e, 0);
+    ASSERT_INT(flow_hit_edge(f, mid, 0), e, "un-hidden edge hittable again");
+    /* hiding a SELECTED edge deselects it (extension of the node rule: no invisible
+       selection — Delete would silently remove it). No event: sel_sig is node-only. */
+    flow_select_edge(f, e, 0);
+    ASSERT_INT(flow_selected_edge(f), e, "precondition: edge selected");
+    flow_set_edge_hidden(f, e, 1);
+    ASSERT_INT(flow_selected_edge(f), -1, "hiding a selected edge deselects it");
+    flow_set_edge_hidden(f, e, 0);
+    ASSERT_INT(flow_selected_edge(f), -1, "un-hiding does NOT reselect the edge");
+    /* endpoint cascade: hiding the SOURCE node hides the edge */
+    flow_set_node_hidden(f, a, 1);
+    ASSERT_INT(flow_hit_edge(f, mid, 0), -1, "source hidden: edge cascades to hidden");
+    flow_set_node_hidden(f, a, 0);
+    ASSERT_INT(flow_hit_edge(f, mid, 0), e, "source shown: edge back");
+    /* target side too */
+    flow_set_node_hidden(f, b, 1);
+    ASSERT_INT(flow_hit_edge(f, mid, 0), -1, "target hidden: edge cascades to hidden");
+    flow_set_node_hidden(f, b, 0);
+    flow_free(f);
+  }
+
   return flowtest_report("test_edge");
 }

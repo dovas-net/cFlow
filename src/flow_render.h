@@ -59,7 +59,9 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
   for (int x = vx; x <= vx2; x++) { flow_put(&s, 1+x, 1+vy, 0x2500, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+x, 1+vy2, 0x2500, FLOW_FG, FLOW_BG, 0); }
   for (int y = vy; y <= vy2; y++) { flow_put(&s, 1+vx, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+vx2, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); }
   for (int i = 0; i < f->nnodes; i++) {
-    flow_node *n = &f->nodes[i]; flow_pt a = flow_node_abs(f, n);
+    flow_node *n = &f->nodes[i];
+    if (!flow__node_visible(f, n)) continue;     /* hidden nodes get no minimap dot */
+    flow_pt a = flow_node_abs(f, n);
     int cx = a.x + n->w / 2, cy = a.y + n->h / 2;
     int mx = (cx - W.x) * iw / W.w, my = (cy - W.y) * ih / W.h;
     if (mx < 0) mx = 0; if (mx > iw - 1) mx = iw - 1;
@@ -122,6 +124,7 @@ int flow_edge_endpoint_screen(flow_t *f, const flow_edge *e, int which, flow_pt 
 int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
   for (int i = flow_edge_count(f) - 1; i >= 0; i--) {         /* topmost first (reverse, like flow_hit_node) */
     flow_edge *e = &flow_edges(f)[i];
+    if (!flow__edge_visible(f, e)) continue;                  /* hidden / cascaded: not hittable */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
@@ -171,6 +174,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
      hit-test (flow_hit_edge) and this draw can never drift apart. */
   for (int i = 0; i < flow_edge_count(f); i++) {
     flow_edge *e = &flow_edges(f)[i];
+    if (!flow__edge_visible(f, e)) continue;   /* hidden edge OR hidden endpoint (cascade) */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
@@ -199,6 +203,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     int *order = flow__node_order(f, 1);
     for (int k = 0; k < flow_node_count(f); k++) {
       flow_node *n = &flow_nodes(f)[order ? order[k] : k];
+      if (!flow__node_visible(f, n)) continue;   /* same gate as flow_hit_node */
       flow_rect wr = flow_node_rect_abs(f, n);
       flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
       const flow_node_type *nt = flow_node_type_for(f, n->type);

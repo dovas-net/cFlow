@@ -334,6 +334,40 @@ int main(void) {
     free(wb); flow_free(wf);
   }
 
+  /* ---- hidden nodes/edges are skipped by render + minimap (inc-4 #11) ---- */
+  {
+    flow_t *h = flow_new(cols, rows); flow_register_defaults(h);
+    int ha = flow_add_node(h, "default", (flow_pt){0, 0},  (void*)"A");
+    int hb = flow_add_node(h, "default", (flow_pt){20, 0}, (void*)"B");
+    int hc = flow_add_node(h, "default", (flow_pt){8, 4},  (void*)"C");
+    flow_add_edge(h, ha, hb, "out", "in");
+    int ecb = flow_add_edge(h, hc, hb, "out", "in");          /* cascade: C hidden -> edge gone */
+    (void)ecb;
+    flow_set_node_hidden(h, hc, 1);
+    flow_render(h, buf, cols, rows);
+    char *hs = cells_to_string(buf, cols, rows);
+    /* mechanical guards so even the snapshot-creation run proves the skip: */
+    ASSERT(strchr(hs, 'C') == NULL, "hidden node's label is nowhere in the frame");
+    ASSERT(strchr(hs, 'A') != NULL && strchr(hs, 'B') != NULL, "visible nodes still render");
+    SNAPSHOT("render_hidden", hs);   /* A and B + their edge; no C, no C->B edge */
+    free(hs);
+    /* un-hide: C reappears (no snapshot; behavioral) */
+    flow_set_node_hidden(h, hc, 0);
+    flow_render(h, buf, cols, rows);
+    char *hs2 = cells_to_string(buf, cols, rows);
+    ASSERT(strchr(hs2, 'C') != NULL, "un-hidden node renders again");
+    free(hs2);
+    /* minimap dots skip hidden: A,B visible + C hidden -> exactly 2 dots */
+    flow_set_node_hidden(h, hc, 1);
+    flow_set_minimap(h, 1, FLOW_CORNER_BR, 12, 6);
+    flow_render(h, buf, cols, rows);
+    int dots = 0;
+    for (int i = 0; i < cols * rows; i++)
+      if (buf[i].ch == 0x2022 || buf[i].ch == 0x25C9) dots++;
+    ASSERT_INT(dots, 2, "minimap draws dots for the two VISIBLE nodes only");
+    flow_free(h);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

@@ -393,6 +393,26 @@ int main(void) {
     flow_free(a); flow_free(b);
   }
 
+  /* ---- hidden flags do NOT survive save/load (inc-4 #11, flags-not-persisted) ---- */
+  {
+    const char *P_HID = "/tmp/flow_json_hidden.json";
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_set_node_hidden(f, a, 1);
+    flow_set_edge_hidden(f, e, 1);
+    ASSERT_INT(flow_save(f, P_HID), 0, "save with hidden node + edge ok");
+    flow_t *g = flow_new(80, 24); flow_register_defaults(g);
+    ASSERT_INT(flow_load(g, P_HID), 0, "load ok");
+    ASSERT(flow_get_node(g, a) != NULL, "hidden node was persisted (as a node)");
+    ASSERT(!(flow_get_node(g, a)->flags & FLOW_HIDDEN), "  but NOT its hidden flag (v1 contract)");
+    ASSERT(!(flow_get_edge(g, e)->flags & FLOW_HIDDEN), "edge hidden flag dropped too");
+    ASSERT_INT(flow_hit_node(g, (flow_pt){12, 6}), a, "  reloaded node is hittable (visible)");
+    flow_free(f); flow_free(g);
+    remove(P_HID);
+  }
+
   /* clean up temp files */
   remove(P_BASIC); remove(P_A); remove(P_B); remove(P_DEV); remove(P_GARB);
 

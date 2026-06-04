@@ -108,5 +108,18 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- marquee skips hidden nodes (inc-4 #11, view-level filtering) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){10, 12}, (void*)"B");
+    flow_set_node_hidden(f, b, 1);
+    int n = flow_select_in_rect(f, (flow_rect){5, 2, 30, 18}, FLOW_SELECT_PARTIAL, 0);
+    ASSERT_INT(n, 1, "marquee over both selects only the visible node");
+    ASSERT(flow_get_node(f, a)->flags & FLOW_SELECTED, "  A selected");
+    ASSERT(!(flow_get_node(f, b)->flags & FLOW_SELECTED), "  hidden B not selected");
+    flow_free(f);
+  }
+
   return flowtest_report("test_marquee");
 }
