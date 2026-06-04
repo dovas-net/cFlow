@@ -167,5 +167,34 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- public setter: flow_set_autopan (integration pass — the app-side knob) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_set_autopan(f, 5, 3);
+    ASSERT_INT(f->autopan_margin, 5, "flow_set_autopan sets margin");
+    ASSERT_INT(f->autopan_speed,  3, "flow_set_autopan sets speed");
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_pt o0 = org(f);
+    press_at(f, 11, 6); move_to(f, 79, 12);   /* node drag into the right band */
+    ASSERT_INT(org(f).x, o0.x - 3, "setter-tuned speed honored by the drag path");
+    release_at(f, 79, 12);
+    flow_set_autopan(f, -2, -5);              /* negatives clamp to 0 (0 = disabled) */
+    ASSERT_INT(f->autopan_margin, 0, "negative margin clamps to 0");
+    ASSERT_INT(f->autopan_speed,  0, "negative speed clamps to 0");
+    flow_free(f);
+  }
+  /* margin 0 disables — FRESH instance (the node above moved away from (11,6);
+     pressing there again would start a pane-pan, not a node drag) */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_set_autopan(f, 0, 3);
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_pt o0 = org(f);
+    press_at(f, 11, 6); move_to(f, 79, 12);   /* node drag into the right band */
+    ASSERT_INT(org(f).x, o0.x, "margin 0 disables auto-pan");
+    release_at(f, 79, 12);
+    flow_free(f);
+  }
+
   return flowtest_report("test_autopan");
 }

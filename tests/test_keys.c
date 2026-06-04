@@ -181,6 +181,26 @@ int main(void) {
     free(buf); flow_free(f);
   }
 
+  /* ---- statusbar help mentions Space-pan and undo/redo (integration pass) ----
+     The hints are APPENDED past column 30 so the render_statusbar golden (rendered
+     at cols=30, locking only the " n:add  x:del  f:fit  ?:help" prefix) stays
+     byte-identical; a real-width terminal shows the full line. */
+  {
+    int cols = 80, rows = 4;
+    flow_cell *buf = (flow_cell*)malloc((size_t)cols * rows * sizeof(flow_cell));
+    flow_t *f = flow_new(cols, rows); flow_register_defaults(f);
+    flow_set_statusbar(f, 1);
+    flow_render(f, buf, cols, rows);
+    char row[81];
+    for (int x = 0; x < cols; x++) { uint32_t ch = buf[(rows-1)*cols + x].ch; row[x] = (ch >= 32 && ch < 127) ? (char)ch : ' '; }
+    row[cols] = 0;
+    ASSERT(strstr(row, " n:add  x:del  f:fit  ?:help  q:quit") == row, "locked prefix unchanged");
+    ASSERT(strstr(row, "SPC:pan") != NULL, "help mentions Space-pan");
+    ASSERT(strstr(row, "u:undo") != NULL, "help mentions undo");
+    ASSERT(strstr(row, "^r:redo") != NULL, "help mentions redo");
+    free(buf); flow_free(f);
+  }
+
   /* ---- free-after-remove: remove all nodes, then flow_free (ASan clean) ---- */
   {
     flow_t *f = flow_new(80, 24); flow_register_defaults(f);

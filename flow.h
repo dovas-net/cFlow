@@ -290,6 +290,7 @@ void flow_delete_selection(flow_t *f);     /* built-in: remove selected node(s) 
 int  flow_add_node_center(flow_t *f, const char *type, void *data); /* add at world point under viewport center; returns id */
 void flow_fit_view(flow_t *f, int margin); /* getViewportForBounds: pick zoom+pan so flow_bounds fits with `margin` cells of padding (zoom clamped to [zmin,zmax]); no-op when empty */
 void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom help/status line */
+void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-pan band (defaults 3/2): margin = band width in cells, speed = step per motion event; negatives clamp to 0, margin 0 disables */
 
 /* ---- undo/redo: capped inverse-op command journal (spec §11) ----
    Every recorded mutator (add/remove node+edge, move, reconnect, set-label, reparent)
@@ -1048,6 +1049,10 @@ void flow_fit_view(flow_t *f, int margin) {
   f->view.oy = f->rows / 2.0f - (b.y + b.h / 2.0f) * z;
 }
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
+void flow_set_autopan(flow_t *f, int margin, int speed) {
+  f->autopan_margin = margin < 0 ? 0 : margin;   /* 0 = no band = disabled */
+  f->autopan_speed  = speed  < 0 ? 0 : speed;
+}
 void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user) {
   if (!seq || !*seq) return;
   size_t len = strlen(seq); if (len >= sizeof f->keys[0].seq) return;  /* seq too long for slot */
@@ -2155,7 +2160,14 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   if (f->statusbar && rows > 0) {
     flow_surface s = { &cb, 0, rows - 1, cols, 1, 0, 0, cols, rows };  /* full-buffer clip */
     for (int x = 0; x < cols; x++) flow_put(&s, x, 0, ' ', FLOW_FG, FLOW_BG, FLOW_REVERSE);
-    flow_text(&s, 0, 0, " n:add  x:del  f:fit  ?:help  q:quit ", FLOW_FG, FLOW_BG, FLOW_REVERSE);
+    /* While space-pan is armed the bar becomes a mode indicator. The normal help
+       line APPENDS the newer hints past column 30: the render_statusbar golden is
+       rendered at cols=30 and locks only the " n:add ... ?:help" prefix — editing
+       that prefix means deliberately regenerating the golden. */
+    flow_text(&s, 0, 0, f->space_held
+              ? " PAN  drag:pan  Space/Esc:exit "
+              : " n:add  x:del  f:fit  ?:help  q:quit  SPC:pan  u:undo  ^r:redo ",
+              FLOW_FG, FLOW_BG, FLOW_REVERSE);
   }
 }
 #endif
@@ -2932,9 +2944,15 @@ void flow_feed(flow_t *f, const char *b, int n) {
        flow_dispatch_key so a user flow_bind_key('+') override still wins via the registry. */
     if (b[i] == '+' || b[i] == '=') { flow_zoom_in (f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
     if (b[i] == '-' || b[i] == '_') { flow_zoom_out(f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
-    /* lone ESC (not the start of a CSI) cancels an in-flight connection. Real
-       mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above. */
-    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); i++; continue; }
+    /* lone ESC (not the start of a CSI) cancels an in-flight connection and exits
+       space-pan mode (the Esc alias for the sticky Space toggle). Real
+       mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above.
+       ACCEPTED trade-off: a CSI split by a read() boundary exactly after its ESC
+       byte reads as a lone ESC here (terminals write sequences atomically, so this
+       is theoretical); the alternative — requiring a next byte to prove loneness —
+       would break the COMMON case, a tapped ESC arriving as a 1-byte read. A real
+       fix is an ESC-timeout state machine; out of scope for v1. */
+    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); f->space_held = 0; i++; continue; }
     i++;
   }
 }

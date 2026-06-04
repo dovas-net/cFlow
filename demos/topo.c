@@ -1,15 +1,22 @@
 /* topo — flow's flagship demo: a tiny network-topology editor.
  *
  * Demonstrates a custom node type (device) with rich data, selection,
- * a right-click details panel (via the on_overlay hook), and the minimap.
+ * a right-click details panel (via the on_overlay hook), the minimap,
+ * groups, force-directed auto-layout, undo/redo, and the observer events
+ * (the top-left ticker echoes connect/select/delete as they fire).
  *
  * Controls:
- *   left-drag a node ........ move it (edges re-route live)
+ *   left-drag a node ........ move it (edges re-route live; auto-pans near the
+ *                             edge, drop ONTO a group to nest, drag out to unnest)
  *   left-click a node ....... select it (highlighted border, reveals ◉ ports)
  *   drag from a ◉ port ...... draw a connection to another node's port (Esc cancels)
  *   right-click a node ...... open its details panel
  *   left-click empty space .. clear selection / close panel
  *   left-drag empty space ... pan;  scroll/wheel ... pan;  arrows ... pan
+ *   Space ................... toggle pan mode (drag pans even over nodes; Esc exits)
+ *   l ....................... auto-arrange (force-directed) + fit
+ *   g / G ................... group the selection / ungroup the selected group
+ *   u / Ctrl-r .............. undo / redo
  *   q ....................... quit
  */
 #define FLOW_IMPLEMENTATION
@@ -68,14 +75,52 @@ static const flow_node_type DEVICE = { "device", dev_measure, dev_render, flow_d
 
 /* app state for the details panel */
 static int g_info_node = -1;
+/* events showcase: the last observer callback, echoed in the overlay ticker */
+static char g_event[48] = "";
 
 static void on_context(flow_t *f, int node, flow_pt scr, void *u) { (void)f;(void)scr;(void)u; g_info_node = node; }
 static void on_pane(flow_t *f, flow_pt w, void *u) { (void)f;(void)w;(void)u; g_info_node = -1; }
+static void on_connect_ev(flow_t *f, int s, int t, void *u) {
+  (void)f;(void)u; snprintf(g_event, sizeof g_event, "event: connect %d->%d", s, t);
+}
+static void on_select_ev(flow_t *f, const int *ids, int n, void *u) {
+  (void)f;(void)ids;(void)u;
+  if (n > 0) snprintf(g_event, sizeof g_event, "event: select x%d", n);
+  else       snprintf(g_event, sizeof g_event, "event: selection cleared");
+}
+static void on_delete_ev(flow_t *f, const int *ids, int n, void *u) {
+  (void)f;(void)ids;(void)u; snprintf(g_event, sizeof g_event, "event: delete x%d", n);
+}
+/* showcase keys: force-directed auto-layout + group/ungroup the selection */
+static void key_layout(flow_t *f, void *u) {
+  (void)u;
+  flow_layout_opts o = {0};                  /* FORCE defaults: organic spread for a network */
+  o.iterations = 250; o.fit_after = 1; o.margin = 2;
+  flow_layout(f, o);
+}
+static void key_group(flow_t *f, void *u) {
+  (void)u;
+  int n = flow_selected_count(f);
+  if (n < 1) return;
+  int *ids = (int*)malloc((size_t)n * sizeof(int));
+  flow_selected_nodes(f, ids, n);
+  int gid = flow_group(f, ids, n);
+  if (gid != -1) { flow_node *g = flow_get_node(f, gid); if (g) g->data = (void*)"cluster"; }
+  free(ids);
+}
+static void key_ungroup(flow_t *f, void *u) {
+  (void)u;
+  int id = flow_selected_node(f);
+  if (id != -1) flow_ungroup(f, id);         /* no-op unless it IS a group */
+}
 static void on_overlay(flow_t *f, flow_surface *s, void *u) {
   (void)u;
+  if (g_event[0]) flow_text(s, 1, 0, g_event, FLOW_FG, FLOW_BG, FLOW_DIM);  /* events ticker */
   if (g_info_node == -1) return;
   flow_node *n = flow_get_node(f, g_info_node);
   if (!n) return;
+  if (strcmp(n->type, "device") != 0) return;  /* details are device-only: 'n'-added defaults
+                                                  and 'g'-created clusters carry no device struct */
   const device *d = (const device*)n->data;
   int w = 42, h = 8;
   int ox = flow_surface_w(s) - w - 1, oy = flow_surface_h(s) - h - 1;
@@ -108,15 +153,44 @@ int main(void) {
     int c = flow_add_node(f, "device", (flow_pt){62,  5}, &dca);
     flow_add_edge(f, a, b, "", "");
     flow_add_edge(f, a, c, "", "");
+  } else {
+    /* 'g'-created clusters persist structure (id/x/y/parent) but neither size nor
+       label — the group type has no save/load hooks (v1) and JSON carries no w/h,
+       so a loaded container would measure 0x0. Re-derive each box from its children
+       (+1 pad, matching flow_group) and re-label. Array order suffices for nesting:
+       containers are appended after their members, so inner boxes resolve first. */
+    for (int i = 0; i < flow_node_count(f); i++) {
+      flow_node *g = &flow_nodes(f)[i];
+      if (strcmp(g->type, "group") != 0) continue;
+      flow_rect bb = {0,0,0,0}; int have = 0;
+      for (int j = 0; j < flow_node_count(f); j++) {
+        flow_node *c = &flow_nodes(f)[j];
+        if (c->parent != g->id) continue;
+        flow_rect r = flow_node_rect_abs(f, c);
+        bb = have ? flow_rect_union(bb, r) : r; have = 1;
+      }
+      flow_pt gp = flow_node_abs(f, g);
+      if (have) { g->w = bb.x + bb.w + 1 - gp.x; g->h = bb.y + bb.h + 1 - gp.y; }
+      else      { g->w = 6; g->h = 3; }          /* childless container: keep a visible box */
+      g->data = (void*)"cluster";
+    }
   }
 
   flow_callbacks cb = {0};
-  cb.on_node_context = on_context;
-  cb.on_pane_click   = on_pane;
-  cb.on_overlay      = on_overlay;
+  cb.on_node_context     = on_context;
+  cb.on_pane_click       = on_pane;
+  cb.on_overlay          = on_overlay;
+  cb.on_connect          = on_connect_ev;    /* events showcase: echo into the ticker */
+  cb.on_selection_change = on_select_ev;
+  cb.on_nodes_delete     = on_delete_ev;
   flow_set_callbacks(f, cb);
   flow_set_minimap(f, 1, FLOW_CORNER_TR, 22, 7);
   flow_set_background(f, FLOW_BG_DOTS, 4);
+  flow_set_statusbar(f, 1);                  /* bottom bar: built-ins + SPC:pan u:undo ^r:redo */
+  flow_set_autopan(f, 4, 3);                 /* the public knob: slightly wider/faster band than the 3/2 default */
+  flow_bind_key(f, "l", key_layout,  NULL);  /* force-directed arrange + fit */
+  flow_bind_key(f, "g", key_group,   NULL);
+  flow_bind_key(f, "G", key_ungroup, NULL);
 
   flow_run(f);
   flow_save(f, path);   /* save on quit: topology survives across runs */

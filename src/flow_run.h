@@ -34,9 +34,15 @@ void flow_feed(flow_t *f, const char *b, int n) {
        flow_dispatch_key so a user flow_bind_key('+') override still wins via the registry. */
     if (b[i] == '+' || b[i] == '=') { flow_zoom_in (f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
     if (b[i] == '-' || b[i] == '_') { flow_zoom_out(f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
-    /* lone ESC (not the start of a CSI) cancels an in-flight connection. Real
-       mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above. */
-    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); i++; continue; }
+    /* lone ESC (not the start of a CSI) cancels an in-flight connection and exits
+       space-pan mode (the Esc alias for the sticky Space toggle). Real
+       mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above.
+       ACCEPTED trade-off: a CSI split by a read() boundary exactly after its ESC
+       byte reads as a lone ESC here (terminals write sequences atomically, so this
+       is theoretical); the alternative — requiring a next byte to prove loneness —
+       would break the COMMON case, a tapped ESC arriving as a 1-byte read. A real
+       fix is an ESC-timeout state machine; out of scope for v1. */
+    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); f->space_held = 0; i++; continue; }
     i++;
   }
 }

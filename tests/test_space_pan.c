@@ -107,5 +107,42 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- Esc exits pan mode (integration-pass alias for the sticky toggle) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    feed(f, " ");
+    ASSERT_INT(f->space_held, 1, "Space arms pan mode");
+    feed(f, "\x1b");                                    /* lone ESC (not a CSI prefix) */
+    ASSERT_INT(f->space_held, 0, "lone Esc exits pan mode");
+    feed(f, "\x1b");
+    ASSERT_INT(f->space_held, 0, "Esc with pan off stays off (no toggle)");
+    flow_free(f);
+  }
+
+  /* ---- statusbar shows a pan-mode hint while space_held ---- */
+  {
+    int cols = 40, rows = 6;
+    flow_cell *buf = (flow_cell*)malloc((size_t)cols * rows * sizeof(flow_cell));
+    flow_t *f = flow_new(cols, rows); flow_register_defaults(f);
+    flow_set_statusbar(f, 1);
+    char row[41];
+    flow_render(f, buf, cols, rows);
+    for (int x = 0; x < cols; x++) { uint32_t ch = buf[(rows-1)*cols + x].ch; row[x] = (ch >= 32 && ch < 127) ? (char)ch : ' '; }
+    row[cols] = 0;
+    ASSERT(strstr(row, "n:add") != NULL, "pan off: normal help line");
+    ASSERT(strstr(row, "PAN") == NULL, "pan off: no PAN hint");
+    feed(f, " ");                                       /* pan mode ON */
+    flow_render(f, buf, cols, rows);
+    for (int x = 0; x < cols; x++) { uint32_t ch = buf[(rows-1)*cols + x].ch; row[x] = (ch >= 32 && ch < 127) ? (char)ch : ' '; }
+    row[cols] = 0;
+    ASSERT(strstr(row, "PAN") != NULL, "pan on: statusbar shows the PAN hint");
+    feed(f, " ");                                       /* back OFF: normal help returns */
+    flow_render(f, buf, cols, rows);
+    for (int x = 0; x < cols; x++) { uint32_t ch = buf[(rows-1)*cols + x].ch; row[x] = (ch >= 32 && ch < 127) ? (char)ch : ' '; }
+    row[cols] = 0;
+    ASSERT(strstr(row, "n:add") != NULL, "pan off again: normal help restored");
+    free(buf); flow_free(f);
+  }
+
   return flowtest_report("test_space_pan");
 }

@@ -119,6 +119,7 @@ void flow_delete_selection(flow_t *f);     /* built-in: remove selected node(s) 
 int  flow_add_node_center(flow_t *f, const char *type, void *data); /* add at world point under viewport center; returns id */
 void flow_fit_view(flow_t *f, int margin); /* getViewportForBounds: pick zoom+pan so flow_bounds fits with `margin` cells of padding (zoom clamped to [zmin,zmax]); no-op when empty */
 void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom help/status line */
+void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-pan band (defaults 3/2): margin = band width in cells, speed = step per motion event; negatives clamp to 0, margin 0 disables */
 
 /* ---- undo/redo: capped inverse-op command journal (spec §11) ----
    Every recorded mutator (add/remove node+edge, move, reconnect, set-label, reparent)
@@ -877,6 +878,10 @@ void flow_fit_view(flow_t *f, int margin) {
   f->view.oy = f->rows / 2.0f - (b.y + b.h / 2.0f) * z;
 }
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
+void flow_set_autopan(flow_t *f, int margin, int speed) {
+  f->autopan_margin = margin < 0 ? 0 : margin;   /* 0 = no band = disabled */
+  f->autopan_speed  = speed  < 0 ? 0 : speed;
+}
 void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user) {
   if (!seq || !*seq) return;
   size_t len = strlen(seq); if (len >= sizeof f->keys[0].seq) return;  /* seq too long for slot */

@@ -271,7 +271,14 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   if (f->statusbar && rows > 0) {
     flow_surface s = { &cb, 0, rows - 1, cols, 1, 0, 0, cols, rows };  /* full-buffer clip */
     for (int x = 0; x < cols; x++) flow_put(&s, x, 0, ' ', FLOW_FG, FLOW_BG, FLOW_REVERSE);
-    flow_text(&s, 0, 0, " n:add  x:del  f:fit  ?:help  q:quit ", FLOW_FG, FLOW_BG, FLOW_REVERSE);
+    /* While space-pan is armed the bar becomes a mode indicator. The normal help
+       line APPENDS the newer hints past column 30: the render_statusbar golden is
+       rendered at cols=30 and locks only the " n:add ... ?:help" prefix — editing
+       that prefix means deliberately regenerating the golden. */
+    flow_text(&s, 0, 0, f->space_held
+              ? " PAN  drag:pan  Space/Esc:exit "
+              : " n:add  x:del  f:fit  ?:help  q:quit  SPC:pan  u:undo  ^r:redo ",
+              FLOW_FG, FLOW_BG, FLOW_REVERSE);
   }
 }
 #endif
