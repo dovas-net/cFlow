@@ -282,6 +282,22 @@ void flow_set_marquee_mode(flow_t *f, flow_select_mode mode);  /* default mode f
 void flow_remove_node(flow_t *f, int id);  /* cascades incident edges AND child nodes (recursive), frees edge labels */
 void flow_remove_edge(flow_t *f, int id);  /* frees label; no-op if id absent */
 void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *handle, int which); /* which: 0=source,1=target; repoint that endpoint; revalidated like flow_add_edge (rejects self + duplicate (source,target,handles)); edge left unchanged on rejection */
+
+/* isValidConnection predicate (inc-4 #9): return 1 to allow, 0 to reject. A GATE, not
+   an observer — it decides whether the mutation happens, so it lives on struct flow,
+   NOT in flow_callbacks (those fire after success). Called at the ENGINE level for
+   EVERY add/reconnect attempt, programmatic or interactive (deliberate divergence
+   from xyflow's interactive-only gating), AFTER the structural rejects (self-edge,
+   missing nodes, duplicates) so expensive user logic only sees structurally valid
+   proposals. Rejection is silent: graph unchanged, nothing journaled, no callbacks.
+   handles are "" if none. NULL fn (the default) = allow all, zero overhead.
+   TRANSIENT, like the extents: flow_load rebuilds edges THROUGH flow_add_edge, so a
+   validator left set across a load re-gates every loaded edge and can silently drop
+   them — clear it before (or set it after) flow_load. Not persisted. */
+typedef int (*flow_connection_validator)(flow_t *f, int source, int target,
+                                         const char *source_handle, const char *target_handle,
+                                         void *user);
+void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void *user);
 void flow_set_edge_label(flow_t *f, int edge, const char *label); /* strdup into edge->label, freeing prior; NULL clears */
 
 /* edge hit-test & endpoints — DEFINED in flow_render.h (need the render anchor helpers).
@@ -407,6 +423,7 @@ struct flow {
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
+  flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */
   int reconnect_edge, reconnect_which;                        /* in-flight endpoint-reconnect drag: edge id (-1 idle) + which endpoint (0=source,1=target) */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
@@ -803,6 +820,9 @@ int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   for (int i = 0; i < f->nedges; i++)                          /* dup = same (source,target,handles) */
     if (f->edges[i].source == src && f->edges[i].target == dst &&
         strcmp(f->edges[i].source_handle, shs) == 0 && strcmp(f->edges[i].target_handle, ths) == 0) return -1;
+  /* engine validator gate (inc-4 #9): AFTER the fast structural rejects, BEFORE the
+     append/record. Silent reject: -1, nothing journaled. */
+  if (f->validator_fn && !f->validator_fn(f, src, dst, shs, ths, f->validator_user)) return -1;
   f->edges = (flow_edge*)flow__grow(f->edges, &f->capedges, f->nedges + 1, sizeof(flow_edge));
   flow_edge *e = &f->edges[f->nedges++]; memset(e, 0, sizeof *e);
   e->id = f->nexteid++; e->source = src; e->target = dst;
@@ -1007,6 +1027,9 @@ void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *han
         strcmp(f->edges[i].source_handle, nsh) == 0 &&
         strcmp(f->edges[i].target_handle, nth) == 0) return;
   }
+  /* engine validator gate (inc-4 #9): sees the PROSPECTIVE endpoints, after the
+     structural rejects, before the record. Silent reject: edge left unchanged. */
+  if (f->validator_fn && !f->validator_fn(f, nsrc, ntgt, nsh, nth, f->validator_user)) return;
   if (flow__rec_gate(f))                /* validated: record old endpoint+handle BEFORE the commit */
     flow__rec_reconnect(f, edge, which,
                         which == 0 ? e->source : e->target,
@@ -1130,6 +1153,9 @@ void flow_fit_view(flow_t *f, int margin) {
   if (z > f->zmax) z = f->zmax;
   flow__view_set(f, f->cols / 2.0f - (b.x + b.w / 2.0f) * z,  /* seam clamps (extent wins over centering) + fires */
                     f->rows / 2.0f - (b.y + b.h / 2.0f) * z, z);
+}
+void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void *user) {
+  f->validator_fn = fn; f->validator_user = user;   /* NULL fn = allow all (default) */
 }
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_set_autopan(flow_t *f, int margin, int speed) {
