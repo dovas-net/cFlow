@@ -198,6 +198,12 @@ typedef struct {
   void (*on_edge_click)(flow_t *f, int edge, void *user);                 /* left-click (no drag) on an edge's routed path (fires AFTER flow_select_edge) */
   void (*on_edge_context)(flow_t *f, int edge, flow_pt screen, void *user);/* right-click on an edge's routed path (a node hit takes precedence) */
   void (*on_edge_dblclick)(flow_t *f, int edge, void *user);              /* 2nd consecutive click on the same edge id (fires AFTER on_edge_click; pair then consumed) */
+  void (*on_connect_start)(flow_t *f, int source_node, const char *handle, void *user); /* a source handle was grabbed: connection preview in flight */
+  void (*on_connect_end)(flow_t *f, int edge_id, int source, int target, void *user);
+    /* fired at EVERY connection-gesture exit: edge_id = the new edge (success) or -1
+       (cancel / drop / reject); target = the attempted target node (-1 for cancels and
+       empty/self drops). Fires AFTER on_connect and AFTER the undo txn settles.
+       Reconnect drags fire NO lifecycle events in v1 (model-only mutation). */
   void *user;
 } flow_callbacks;
 void flow_set_callbacks(flow_t *f, flow_callbacks cb);
@@ -1071,6 +1077,7 @@ int flow_begin_connection(flow_t *f, int node, const char *handle) {
   snprintf(f->conn_handle, sizeof f->conn_handle, "%s", handle ? handle : "");
   flow_node *n = flow_get_node(f, node);
   if (n) f->conn_end = flow_to_screen(f, flow_handle_anchor(f, n, h));   /* start the free end at the source */
+  if (f->cb.on_connect_start) f->cb.on_connect_start(f, node, f->conn_handle, f->cb.user);
   return 0;
 }
 int flow_update_connection(flow_t *f, flow_pt screen) {
@@ -1097,10 +1104,16 @@ int flow_end_connection(flow_t *f, int node, const char *handle) {
   int eid = flow_add_edge(f, src, node, sh, th);
   if (eid != -1 && f->cb.on_connect) f->cb.on_connect(f, src, node, f->cb.user);
   flow__undo_end(f);
+  /* lifecycle end: AFTER the txn settles so the journal is consistent when the app
+     reacts. target = the attempted node even on reject (spec 3c); success passes eid. */
+  if (f->cb.on_connect_end) f->cb.on_connect_end(f, eid, src, node, f->cb.user);
   return eid;
 }
 void flow_cancel_connection(flow_t *f) {
+  if (!f->conn_active) return;                    /* idempotent: no gesture -> no event (ESC calls this unconditionally) */
+  int src = f->conn_node;
   f->conn_active = 0; f->conn_node = -1; f->conn_handle[0] = 0;
+  if (f->cb.on_connect_end) f->cb.on_connect_end(f, -1, src, -1, f->cb.user);
 }
 int flow_connecting(flow_t *f) { return f->conn_active ? 1 : 0; }
 #endif

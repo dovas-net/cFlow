@@ -18,6 +18,11 @@ static char *cells_to_string(const flow_cell *c, int cols, int rows) {
 static int g_hits = 0;
 static void inc_hits(flow_t *f, void *u) { (void)f; (void)u; g_hits++; }
 static int g_xcustom = 0;
+/* connect-lifecycle ESC tracking (inc-4 #7) */
+static int key_cend_fires = 0, key_cend_eid = -2, key_cend_src = -2;
+static void key_on_cend(flow_t *f, int eid, int src, int tgt, void *u) {
+  (void)f;(void)tgt;(void)u; key_cend_fires++; key_cend_eid = eid; key_cend_src = src;
+}
 static void x_custom(flow_t *f, void *u) { (void)f; (void)u; g_xcustom++; }
 static int g_ctrlup = 0;
 static void ctrl_up(flow_t *f, void *u) { (void)f; (void)u; g_ctrlup++; }
@@ -243,6 +248,25 @@ int main(void) {
     ASSERT_INT(flow_node_count(f), 71, "71 nodes before delete");
     flow_delete_selection(f);
     ASSERT_INT(flow_node_count(f), 1, "delete_selection removed all 70 selected (no cap)");
+    flow_free(f);
+  }
+
+  /* ---- lone ESC during a connection fires on_connect_end and clears state (inc-4 #7) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_callbacks cb = {0}; cb.on_connect_end = key_on_cend; flow_set_callbacks(f, cb);
+    key_cend_fires = 0; key_cend_eid = -2; key_cend_src = -2;
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out -> connection in flight */
+    ASSERT_INT(flow_connecting(f), 1, "connection in flight before ESC");
+    flow_feed(f, "\x1b", 1);                            /* lone ESC aborts */
+    ASSERT_INT(flow_connecting(f), 0, "ESC cleared the connection state");
+    ASSERT_INT(key_cend_fires, 1, "ESC cancel fired on_connect_end once");
+    ASSERT_INT(key_cend_eid, -1, "  eid -1 (no edge)");
+    ASSERT_INT(key_cend_src, a, "  source A");
+    flow_feed(f, "\x1b", 1);                            /* ESC again: nothing in flight */
+    ASSERT_INT(key_cend_fires, 1, "idempotent ESC fires NO further on_connect_end");
     flow_free(f);
   }
 

@@ -4,9 +4,31 @@
 
 /* on_connect tracking */
 static int conn_src = -2, conn_dst = -2, conn_fires = 0;
-static void on_conn(flow_t *f, int s, int t, void *u) { (void)f;(void)u; conn_src = s; conn_dst = t; conn_fires++; }
 static int pane_clicks = 0;
 static void on_pane(flow_t *f, flow_pt w, void *u) { (void)f;(void)w;(void)u; pane_clicks++; }
+
+/* connect lifecycle tracking (inc-4 #7): sequence-stamped to assert ordering */
+static int ev_seq = 0;
+static int start_fires = 0, start_src = -2, start_seq = 0;
+static char start_handle[16];
+static int end_fires = 0, end_eid = -2, end_src = -2, end_tgt = -2, end_seq = 0, end_txn_depth = -1;
+static int conn_seq = 0;
+static int eclick_fires = 0;
+static void on_conn(flow_t *f, int s, int t, void *u) { (void)f;(void)u; conn_src = s; conn_dst = t; conn_fires++; conn_seq = ++ev_seq; }
+static void on_cstart(flow_t *f, int src, const char *handle, void *u) {
+  (void)f;(void)u; start_fires++; start_src = src; start_seq = ++ev_seq;
+  snprintf(start_handle, sizeof start_handle, "%s", handle ? handle : "(null)");
+}
+static void on_cend(flow_t *f, int eid, int src, int tgt, void *u) {
+  (void)u; end_fires++; end_eid = eid; end_src = src; end_tgt = tgt; end_seq = ++ev_seq;
+  end_txn_depth = f->journal.txn_depth;          /* 0 = fired AFTER the undo txn settled */
+}
+static void on_eclick(flow_t *f, int edge, void *u) { (void)f;(void)edge;(void)u; eclick_fires++; }
+static void lc_reset(void) {
+  ev_seq = 0; start_fires = 0; start_src = -2; start_seq = 0; start_handle[0] = 0;
+  end_fires = 0; end_eid = -2; end_src = -2; end_tgt = -2; end_seq = 0; end_txn_depth = -1;
+  conn_fires = 0; conn_src = conn_dst = -2; conn_seq = 0; eclick_fires = 0;
+}
 
 int main(void) {
   /* ---- flow_handle_anchor math ---- */
@@ -208,6 +230,178 @@ int main(void) {
     flow_pt after = flow_to_screen(f, (flow_pt){0, 0});
     ASSERT_INT(after.x, before.x + 3, "empty drag still pans +3");
     flow_feed(f, "\x1b[<0;54;15m", 11);
+    flow_free(f);
+  }
+
+  /* ================= connect lifecycle events (inc-4 #7) ================= */
+
+  /* ---- SUCCESS: start (press) -> on_connect (in txn) -> end (after txn) ---- */
+  {
+    lc_reset();
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");  /* RIGHT@(14,6) */
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");  /* LEFT@(30,6) */
+    flow_callbacks cb = {0};
+    cb.on_connect = on_conn; cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend;
+    flow_set_callbacks(f, cb);
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out */
+    ASSERT_INT(start_fires, 1, "on_connect_start fires on source-handle press");
+    ASSERT_INT(start_src, a, "  start reports source A");
+    ASSERT_STR(start_handle, "out", "  start reports the grabbed handle id");
+    ASSERT_INT(end_fires, 0, "  no end yet (gesture in flight)");
+    flow_feed(f, "\x1b[<32;31;7M", 11);                 /* motion onto B */
+    flow_feed(f, "\x1b[<0;31;7m", 10);                  /* release on B:in */
+    ASSERT_INT(conn_fires, 1, "on_connect fired (success)");
+    ASSERT_INT(end_fires, 1, "on_connect_end fired once");
+    ASSERT_INT(end_eid, flow_edges(f)[0].id, "  end reports the created edge id");
+    ASSERT_INT(end_src, a, "  end reports source A");
+    ASSERT_INT(end_tgt, b, "  end reports target B");
+    ASSERT(start_seq < conn_seq && conn_seq < end_seq, "ordering: start -> on_connect -> end");
+    ASSERT_INT(end_txn_depth, 0, "end fired AFTER the undo txn settled");
+    flow_free(f);
+  }
+
+  /* ---- DROP ON EMPTY: start fires; end(-1, A, -1); no on_connect, no edge ---- */
+  {
+    lc_reset();
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_callbacks cb = {0};
+    cb.on_connect = on_conn; cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend;
+    flow_set_callbacks(f, cb);
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out */
+    flow_feed(f, "\x1b[<32;61;19M", 12);                /* motion to empty (60,18) */
+    flow_feed(f, "\x1b[<0;61;19m", 11);                 /* release on empty */
+    ASSERT_INT(start_fires, 1, "drop-empty: start fired on press");
+    ASSERT_INT(end_fires, 1, "drop-empty: end fired once");
+    ASSERT_INT(end_eid, -1, "  eid -1 (no edge)");
+    ASSERT_INT(end_src, a, "  src A");
+    ASSERT_INT(end_tgt, -1, "  target -1 (empty)");
+    ASSERT_INT(conn_fires, 0, "  no on_connect");
+    ASSERT_INT(flow_edge_count(f), 0, "  no edge added");
+    flow_free(f);
+  }
+
+  /* ---- DROP ON SOURCE SELF: end(-1, A, -1), no on_connect ---- */
+  {
+    lc_reset();
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_callbacks cb = {0};
+    cb.on_connect = on_conn; cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend;
+    flow_set_callbacks(f, cb);
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out */
+    flow_feed(f, "\x1b[<32;13;7M", 11);                 /* motion onto A's own body (12,6) */
+    flow_feed(f, "\x1b[<0;13;7m", 10);                  /* release on the source itself */
+    ASSERT_INT(start_fires, 1, "self-drop: start fired");
+    ASSERT_INT(end_fires, 1, "self-drop: end fired once");
+    ASSERT_INT(end_eid, -1, "  eid -1");
+    ASSERT_INT(end_tgt, -1, "  target -1 (self-drop reports none, spec 3b)");
+    ASSERT_INT(conn_fires, 0, "  no on_connect");
+    flow_free(f);
+  }
+
+  /* ---- VALIDATION REJECT (duplicate): end(-1, A, B) — target is the attempt ---- */
+  {
+    lc_reset();
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    flow_add_edge(f, a, b, "out", "in");                /* pre-existing duplicate */
+    flow_callbacks cb = {0};
+    cb.on_connect = on_conn; cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend;
+    flow_set_callbacks(f, cb);
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out */
+    flow_feed(f, "\x1b[<32;31;7M", 11);                 /* motion onto B */
+    flow_feed(f, "\x1b[<0;31;7m", 10);                  /* release on B:in -> duplicate reject */
+    ASSERT_INT(start_fires, 1, "dup-reject: start fired");
+    ASSERT_INT(end_fires, 1, "dup-reject: end fired once");
+    ASSERT_INT(end_eid, -1, "  eid -1 (rejected)");
+    ASSERT_INT(end_tgt, b, "  target B (the attempted target, spec 3c)");
+    ASSERT_INT(conn_fires, 0, "  no on_connect on reject");
+    ASSERT_INT(flow_edge_count(f), 1, "  still one edge");
+    flow_free(f);
+  }
+
+  /* ---- ESC CANCEL: end(-1, A, -1); idempotent ESC with no gesture stays silent ---- */
+  {
+    lc_reset();
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_callbacks cb = {0};
+    cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend;
+    flow_set_callbacks(f, cb);
+    flow_feed(f, "\x1b", 1);                            /* ESC, nothing in flight */
+    ASSERT_INT(end_fires, 0, "ESC with no gesture fires NO on_connect_end (cancel guard)");
+    flow_cancel_connection(f);                          /* direct no-op cancel */
+    ASSERT_INT(end_fires, 0, "direct cancel with no gesture stays silent");
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out */
+    ASSERT_INT(start_fires, 1, "start fired");
+    flow_feed(f, "\x1b", 1);                            /* ESC aborts */
+    ASSERT_INT(end_fires, 1, "ESC cancel fires end once");
+    ASSERT_INT(end_eid, -1, "  eid -1"); ASSERT_INT(end_src, a, "  src A");
+    ASSERT_INT(end_tgt, -1, "  target -1");
+    ASSERT_INT(flow_connecting(f), 0, "  connection state cleared");
+    flow_free(f);
+  }
+
+  /* ---- RECONNECT ISOLATION: endpoint-reconnect drags fire NO lifecycle events ---- */
+  {
+    lc_reset();
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5},  (void*)"B");
+    int c = flow_add_node(f, "default", (flow_pt){30, 15}, (void*)"C");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_callbacks cb = {0};
+    cb.on_connect = on_conn; cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend;
+    flow_set_callbacks(f, cb);
+    flow_pt tp; flow_edge_endpoint_screen(f, flow_get_edge(f, e), 1, &tp);
+    char seq[32]; int n = snprintf(seq, sizeof seq, "\x1b[<0;%d;%dM", tp.x + 1, tp.y + 1);
+    flow_feed(f, seq, n);                               /* press target endpoint: arm reconnect */
+    flow_feed(f, "\x1b[<32;33;17M", 12);                /* drag onto C's body (32,16) */
+    flow_feed(f, "\x1b[<0;33;17m", 11);                 /* release on C: repoint */
+    ASSERT_INT(flow_get_edge(f, e)->target, c, "reconnect repointed the edge (sanity)");
+    ASSERT_INT(start_fires, 0, "reconnect: NO on_connect_start");
+    ASSERT_INT(conn_fires, 0, "reconnect: NO on_connect");
+    ASSERT_INT(end_fires, 0, "reconnect: NO on_connect_end (model-only in v1)");
+    flow_free(f);
+  }
+
+  /* ---- CROSS-EVENT PIN (#6 deferral): pressing an edge mid-cell while a connection
+          is in flight resolves the gesture (end fires) and CONSUMES the press — the
+          edge click does NOT fire. (#6's conflicts note sketched both events firing;
+          that needs flow_input.h changes outside this package's scope.) ---- */
+  {
+    lc_reset();
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    int c = flow_add_node(f, "default", (flow_pt){10, 15}, (void*)"C");
+    int d = flow_add_node(f, "default", (flow_pt){30, 15}, (void*)"D");
+    int e2 = flow_add_edge(f, c, d, "out", "in");
+    flow_callbacks cb = {0};
+    cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend; cb.on_edge_click = on_eclick;
+    flow_set_callbacks(f, cb);
+    flow_pt s2, t2;
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e2), 0, &s2);
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e2), 1, &t2);
+    flow_pt mid = { (s2.x + t2.x) / 2, (s2.y + t2.y) / 2 };
+    ASSERT_INT(flow_hit_edge(f, mid, 0), e2, "precondition: mid cell sits on the edge path");
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out -> in flight */
+    ASSERT_INT(start_fires, 1, "in-flight precondition: start fired");
+    char seq[32]; int n = snprintf(seq, sizeof seq, "\x1b[<0;%d;%dM", mid.x + 1, mid.y + 1);
+    flow_feed(f, seq, n);                               /* press the edge mid-cell */
+    ASSERT_INT(end_fires, 1, "press on edge mid-flight: gesture resolves (end fires)");
+    ASSERT_INT(end_eid, -1, "  resolved as cancel (no node under the cell)");
+    n = snprintf(seq, sizeof seq, "\x1b[<0;%d;%dm", mid.x + 1, mid.y + 1);
+    flow_feed(f, seq, n);                               /* release */
+    ASSERT_INT(eclick_fires, 0, "  edge click does NOT fire (press consumed by the gesture)");
     flow_free(f);
   }
 
