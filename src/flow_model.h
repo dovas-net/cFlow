@@ -195,6 +195,9 @@ typedef struct {
   void (*on_selection_change)(flow_t *f, const int *ids, int n, void *user); /* fired after the FLOW_SELECTED node set changes; ids in insertion order, only on actual change */
   void (*on_nodes_delete)(flow_t *f, const int *ids, int n, void *user);  /* fired once per delete op with the removed node id set (a cascade reports its children) */
   void (*on_viewport_change)(flow_t *f, flow_viewport vp, void *user);    /* fired after a pan/zoom/fit/load/extent-reclamp mutates the viewport; only on actual change (clamps applied BEFORE the compare); never journaled */
+  void (*on_edge_click)(flow_t *f, int edge, void *user);                 /* left-click (no drag) on an edge's routed path (fires AFTER flow_select_edge) */
+  void (*on_edge_context)(flow_t *f, int edge, flow_pt screen, void *user);/* right-click on an edge's routed path (a node hit takes precedence) */
+  void (*on_edge_dblclick)(flow_t *f, int edge, void *user);              /* 2nd consecutive click on the same edge id (fires AFTER on_edge_click; pair then consumed) */
   void *user;
 } flow_callbacks;
 void flow_set_callbacks(flow_t *f, flow_callbacks cb);
@@ -222,6 +225,7 @@ struct flow {
   int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
   int autopan_margin, autopan_speed;                           /* auto-pan near edge during object drags (node/connect/reconnect): band width (cells) + step per motion event; defaults 3/2 in flow_new */
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
+  int last_click_edge;                                         /* edge dblclick pair state, mirroring last_click_node; broken by any OTHER click (node/pane/different edge) and on flow_load */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
@@ -409,7 +413,7 @@ flow_t *flow_new(int cols, int rows) {
   f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
-  f->reconnect_edge = -1; f->last_click_node = -1;
+  f->reconnect_edge = -1; f->last_click_node = -1; f->last_click_edge = -1;
   f->autopan_margin = 3; f->autopan_speed = 2;
   f->journal.limit = 128; f->journal.txn_base = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
@@ -434,6 +438,7 @@ static void flow__graph_reset(flow_t *f) {
   f->nnodes = f->capnodes = 0; f->nedges = f->capedges = 0;
   f->nextid = 1; f->nexteid = 1;
   f->last_click_node = -1;   /* drop the stale dblclick target: reused ids must not fake a double-click */
+  f->last_click_edge = -1;   /* same for the edge dblclick pair */
 }
 void flow_resize(flow_t *f, int cols, int rows) {
   f->cols = cols; f->rows = rows; free(f->front);

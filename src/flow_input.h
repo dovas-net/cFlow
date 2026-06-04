@@ -83,7 +83,12 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (ev->button == 2) {                       /* right-click: cancel any in-flight connection, else context */
       if (f->conn_active) { flow_cancel_connection(f); return; }
       int id = flow_hit_node(f, scr);
-      if (id != -1 && f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
+      if (id != -1) {                            /* node occludes: an edge under the same cell never fires */
+        if (f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
+        return;
+      }
+      int ectx = flow_hit_edge(f, scr, 1);       /* same tolerance as the left-click edge path */
+      if (ectx != -1 && f->cb.on_edge_context) f->cb.on_edge_context(f, ectx, scr, f->cb.user);
       return;
     }
     if (ev->button == 0) {                       /* arm a press; classify on move/release */
@@ -258,6 +263,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       } else if (f->down_modsel) {
         /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
         f->last_click_node = -1;                 /* a modifier-click breaks any double-click pair */
+        f->last_click_edge = -1;
       } else if (f->down_node != -1) {
         flow_select_node(f, f->down_node, 0);
         if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
@@ -267,15 +273,25 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         } else {
           f->last_click_node = f->down_node;
         }
+        f->last_click_edge = -1;                 /* a node click breaks the edge dblclick pair */
       } else {
         int eclick = flow_hit_edge(f, scr, 1);   /* edge-body click-select before clearing/pane-click */
         if (eclick != -1) {
           flow_select_edge(f, eclick, 0);
+          /* edge observer trio, mirroring the node branch exactly: select -> click -> dblclick */
+          if (f->cb.on_edge_click) f->cb.on_edge_click(f, eclick, f->cb.user);
+          if (eclick == f->last_click_edge) {    /* 2nd consecutive click on the SAME edge: double-click */
+            if (f->cb.on_edge_dblclick) f->cb.on_edge_dblclick(f, eclick, f->cb.user); /* fires AFTER on_edge_click */
+            f->last_click_edge = -1;             /* consume the pair */
+          } else {
+            f->last_click_edge = eclick;
+          }
         } else {
           flow_clear_selection(f);
           if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
+          f->last_click_edge = -1;               /* a pane click breaks the edge pair */
         }
-        f->last_click_node = -1;                 /* edge/pane click breaks a double-click pair */
+        f->last_click_node = -1;                 /* edge/pane click breaks the node pair */
       }
     } else if (f->moved && f->drag_node != -1 && flow_selected_count(f) == 1) {
       /* DRAG-TO-REPARENT (single-node drag only for v1). On drop, hit-test the cursor for a

@@ -9,6 +9,10 @@ typedef struct {
   int  del_fires; int del_n;  int del_ids[16];
   int  click_fires; int click_last;
   int  dbl_fires;   int dbl_last;
+  int  eclick_fires; int eclick_last;
+  int  edbl_fires;   int edbl_last;
+  int  ectx_fires;   int ectx_last; flow_pt ectx_screen;
+  int  nctx_fires;   int nctx_last;
 } ev_log;
 
 static void on_sel(flow_t *f, const int *ids, int n, void *u) {
@@ -21,6 +25,10 @@ static void on_del(flow_t *f, const int *ids, int n, void *u) {
 }
 static void on_click(flow_t *f, int node, void *u) { (void)f; ev_log *L = (ev_log*)u; L->click_fires++; L->click_last = node; }
 static void on_dbl(flow_t *f, int node, void *u)   { (void)f; ev_log *L = (ev_log*)u; L->dbl_fires++;   L->dbl_last   = node; }
+static void on_eclick(flow_t *f, int edge, void *u) { (void)f; ev_log *L = (ev_log*)u; L->eclick_fires++; L->eclick_last = edge; }
+static void on_edbl(flow_t *f, int edge, void *u)   { (void)f; ev_log *L = (ev_log*)u; L->edbl_fires++;   L->edbl_last   = edge; }
+static void on_ectx(flow_t *f, int edge, flow_pt screen, void *u) { (void)f; ev_log *L = (ev_log*)u; L->ectx_fires++; L->ectx_last = edge; L->ectx_screen = screen; }
+static void on_nctx(flow_t *f, int node, flow_pt screen, void *u) { (void)f;(void)screen; ev_log *L = (ev_log*)u; L->nctx_fires++; L->nctx_last = node; }
 
 /* feed a no-motion left click (press+release) at world cell (wx,wy); zoom 1 / no pan
    means screen==world. SGR is 1-based. */
@@ -28,6 +36,10 @@ static void click_at(flow_t *f, int wx, int wy) {
   char buf[32];
   snprintf(buf, sizeof buf, "\x1b[<0;%d;%dM", wx + 1, wy + 1); flow_feed(f, buf, (int)strlen(buf));
   snprintf(buf, sizeof buf, "\x1b[<0;%d;%dm", wx + 1, wy + 1); flow_feed(f, buf, (int)strlen(buf));
+}
+static void rclick_at(flow_t *f, int sx, int sy) {           /* right-click press (context fires on press) */
+  char buf[32];
+  snprintf(buf, sizeof buf, "\x1b[<2;%d;%dM", sx + 1, sy + 1); flow_feed(f, buf, (int)strlen(buf));
 }
 
 int main(void) {
@@ -185,18 +197,136 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- edge observers: on_edge_click / on_edge_dblclick pair semantics ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5},  (void*)"B");
+    int c = flow_add_node(f, "default", (flow_pt){10, 15}, (void*)"C");
+    int d = flow_add_node(f, "default", (flow_pt){30, 15}, (void*)"D");
+    int e1 = flow_add_edge(f, a, b, "out", "in");
+    int e2 = flow_add_edge(f, c, d, "out", "in");
+    /* click MID-PATH cells: an edge's ENDPOINT cell is the reconnect-grab affordance
+       (press arms a reconnect drag; its no-move release selects silently), so body
+       clicks — and the events — only happen away from the endpoints. */
+    flow_pt s1, t1, s2, t2;
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e1), 0, &s1);
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e1), 1, &t1);
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e2), 0, &s2);
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e2), 1, &t2);
+    flow_pt p1 = { (s1.x + t1.x) / 2, (s1.y + t1.y) / 2 };
+    flow_pt p2 = { (s2.x + t2.x) / 2, (s2.y + t2.y) / 2 };
+    ASSERT_INT(flow_hit_edge(f, p1, 0), e1, "precondition: mid cell sits on e1's path");
+    ASSERT_INT(flow_hit_edge(f, p2, 0), e2, "precondition: mid cell sits on e2's path");
+    ev_log L = {0};
+    flow_callbacks cb = {0};
+    cb.on_edge_click = on_eclick; cb.on_edge_dblclick = on_edbl;
+    cb.on_node_click = on_click;  cb.on_node_dblclick = on_dbl; cb.user = &L;
+    flow_set_callbacks(f, cb);
+
+    click_at(f, p1.x, p1.y);                          /* click 1 on e1 */
+    ASSERT_INT(L.eclick_fires, 1, "edge click 1: on_edge_click fires");
+    ASSERT_INT(L.eclick_last, e1, "  reports e1");
+    ASSERT_INT(L.edbl_fires, 0, "edge click 1: no dblclick yet");
+    ASSERT_INT(flow_selected_edge(f), e1, "  edge selected");
+    ASSERT_INT(flow_selected_node(f), -1, "  no node selected (mutual exclusivity)");
+
+    click_at(f, p1.x, p1.y);                          /* click 2: pair */
+    ASSERT_INT(L.eclick_fires, 2, "edge click 2: on_edge_click fires again (both fire)");
+    ASSERT_INT(L.edbl_fires, 1, "edge click 2: on_edge_dblclick fires once");
+    ASSERT_INT(L.edbl_last, e1, "  dblclick reports e1");
+
+    click_at(f, p1.x, p1.y);                          /* click 3: pair consumed */
+    ASSERT_INT(L.edbl_fires, 1, "edge click 3: pair consumed -> no new dblclick");
+    click_at(f, p1.x, p1.y);                          /* click 4 pairs with 3 */
+    ASSERT_INT(L.edbl_fires, 2, "edge click 4: pairs with click 3");
+
+    /* pair break: different edge */
+    click_at(f, p1.x, p1.y); click_at(f, p2.x, p2.y);
+    ASSERT_INT(L.edbl_fires, 2, "click e1 then e2: no dblclick (pair broken by different edge)");
+    /* pair break: pane click between */
+    click_at(f, p1.x, p1.y); click_at(f, 70, 22); click_at(f, p1.x, p1.y);
+    ASSERT_INT(L.edbl_fires, 2, "pane click between e1 clicks breaks the pair");
+    /* pair break: node click between; AND node pair broken by an edge click.
+       (pane click first: the block above ends with the e1 pair armed) */
+    click_at(f, 70, 22);
+    click_at(f, p1.x, p1.y); click_at(f, 12, 6); click_at(f, p1.x, p1.y);
+    ASSERT_INT(L.edbl_fires, 2, "node click between e1 clicks breaks the edge pair");
+    L.dbl_fires = 0;
+    click_at(f, 12, 6); click_at(f, p1.x, p1.y); click_at(f, 12, 6);
+    ASSERT_INT(L.dbl_fires, 0, "edge click between node clicks breaks the NODE pair");
+    flow_free(f);
+  }
+
+  /* ---- on_edge_context: right-click on the routed path; node takes precedence ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_pt tp; flow_edge_endpoint_screen(f, flow_get_edge(f, e), 1, &tp);
+    ev_log L = {0};
+    flow_callbacks cb = {0}; cb.on_edge_context = on_ectx; cb.on_node_context = on_nctx; cb.user = &L;
+    flow_set_callbacks(f, cb);
+    rclick_at(f, tp.x, tp.y);                         /* on the path, off the bodies */
+    ASSERT_INT(L.ectx_fires, 1, "right-click on the edge path fires on_edge_context");
+    ASSERT_INT(L.ectx_last, e, "  reports the edge id");
+    ASSERT_INT(L.ectx_screen.x, tp.x, "  screen x delivered");
+    ASSERT_INT(L.ectx_screen.y, tp.y, "  screen y delivered");
+    ASSERT_INT(L.nctx_fires, 0, "  no node context fired");
+    /* tp.x+1 is ON B's left border: node hit AND within edge tol -> node wins */
+    rclick_at(f, tp.x + 1, tp.y);
+    ASSERT_INT(L.nctx_fires, 1, "right-click where node and edge overlap: node context wins");
+    ASSERT_INT(L.nctx_last, b, "  reports node B");
+    ASSERT_INT(L.ectx_fires, 1, "  edge context did NOT fire (precedence)");
+    /* far from everything: neither fires */
+    rclick_at(f, 70, 22);
+    ASSERT_INT(L.ectx_fires + L.nctx_fires, 2, "right-click on empty pane fires nothing");
+    flow_free(f);
+  }
+
+  /* ---- edge dblclick state must NOT survive flow_load (mirror of the node test) ---- */
+  {
+    const char *path = "/tmp/flow_events_edge_reset.json";
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_pt sp, tp;                                   /* mid-path cell (endpoints arm reconnect) */
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e), 0, &sp);
+    flow_edge_endpoint_screen(f, flow_get_edge(f, e), 1, &tp);
+    flow_pt mid = { (sp.x + tp.x) / 2, (sp.y + tp.y) / 2 };
+    ev_log L = {0};
+    flow_callbacks cb = {0}; cb.on_edge_dblclick = on_edbl; cb.on_edge_click = on_eclick; cb.user = &L;
+    flow_set_callbacks(f, cb);
+    click_at(f, mid.x, mid.y);                        /* one click: last_click_edge = e */
+    ASSERT_INT(L.eclick_fires, 1, "single edge click before load fires on_edge_click");
+    ASSERT_INT(L.edbl_fires, 0, "single edge click before load: no dblclick");
+    ASSERT_INT(flow_save(f, path), 0, "save ok");
+    ASSERT_INT(flow_load(f, path), 0, "load ok (graph reset; edge id reused)");
+    ASSERT(flow_get_edge(f, e) != NULL, "reloaded edge has the same id");
+    click_at(f, mid.x, mid.y);                        /* FIRST click after load on that id */
+    ASSERT_INT(L.eclick_fires, 2, "first click after load still fires on_edge_click");
+    ASSERT_INT(L.edbl_fires, 0, "first edge click after flow_load does NOT fire a spurious dblclick");
+    flow_free(f);
+  }
+
   /* ---- NULL-callback safety: every instrumented path runs with all callbacks NULL ---- */
   {
     flow_t *f = flow_new(80, 24); flow_register_defaults(f);
     int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
     int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
     flow_callbacks cb = {0}; flow_set_callbacks(f, cb);   /* all NULL */
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_pt tp; flow_edge_endpoint_screen(f, flow_get_edge(f, e), 1, &tp);
     flow_select_node(f, a, 0); flow_toggle_node(f, b); flow_clear_selection(f);
     flow_feed(f, "\x1b[<4;9;5M", 9); flow_feed(f, "\x1b[<36;17;18M", 12); flow_feed(f, "\x1b[<4;17;18m", 11);
-    click_at(f, 12, 6); click_at(f, 12, 6);              /* would-be dblclick */
+    click_at(f, 12, 6); click_at(f, 12, 6);              /* would-be node dblclick */
+    click_at(f, tp.x, tp.y); click_at(f, tp.x, tp.y);    /* would-be edge dblclick */
+    rclick_at(f, tp.x, tp.y); rclick_at(f, 12, 6);       /* would-be edge/node context */
     flow_select_node(f, a, 0); flow_select_node(f, b, 1);
     flow_delete_selection(f);
-    ASSERT(1, "NULL callbacks: no crash across select/toggle/clear/marquee/dblclick/delete");
+    ASSERT(1, "NULL callbacks: no crash across select/toggle/clear/marquee/dblclick/edge-events/delete");
     flow_free(f);
   }
 

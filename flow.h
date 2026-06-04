@@ -366,6 +366,9 @@ typedef struct {
   void (*on_selection_change)(flow_t *f, const int *ids, int n, void *user); /* fired after the FLOW_SELECTED node set changes; ids in insertion order, only on actual change */
   void (*on_nodes_delete)(flow_t *f, const int *ids, int n, void *user);  /* fired once per delete op with the removed node id set (a cascade reports its children) */
   void (*on_viewport_change)(flow_t *f, flow_viewport vp, void *user);    /* fired after a pan/zoom/fit/load/extent-reclamp mutates the viewport; only on actual change (clamps applied BEFORE the compare); never journaled */
+  void (*on_edge_click)(flow_t *f, int edge, void *user);                 /* left-click (no drag) on an edge's routed path (fires AFTER flow_select_edge) */
+  void (*on_edge_context)(flow_t *f, int edge, flow_pt screen, void *user);/* right-click on an edge's routed path (a node hit takes precedence) */
+  void (*on_edge_dblclick)(flow_t *f, int edge, void *user);              /* 2nd consecutive click on the same edge id (fires AFTER on_edge_click; pair then consumed) */
   void *user;
 } flow_callbacks;
 void flow_set_callbacks(flow_t *f, flow_callbacks cb);
@@ -393,6 +396,7 @@ struct flow {
   int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
   int autopan_margin, autopan_speed;                           /* auto-pan near edge during object drags (node/connect/reconnect): band width (cells) + step per motion event; defaults 3/2 in flow_new */
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
+  int last_click_edge;                                         /* edge dblclick pair state, mirroring last_click_node; broken by any OTHER click (node/pane/different edge) and on flow_load */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
   int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
@@ -580,7 +584,7 @@ flow_t *flow_new(int cols, int rows) {
   f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
-  f->reconnect_edge = -1; f->last_click_node = -1;
+  f->reconnect_edge = -1; f->last_click_node = -1; f->last_click_edge = -1;
   f->autopan_margin = 3; f->autopan_speed = 2;
   f->journal.limit = 128; f->journal.txn_base = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
@@ -605,6 +609,7 @@ static void flow__graph_reset(flow_t *f) {
   f->nnodes = f->capnodes = 0; f->nedges = f->capedges = 0;
   f->nextid = 1; f->nexteid = 1;
   f->last_click_node = -1;   /* drop the stale dblclick target: reused ids must not fake a double-click */
+  f->last_click_edge = -1;   /* same for the edge dblclick pair */
 }
 void flow_resize(flow_t *f, int cols, int rows) {
   f->cols = cols; f->rows = rows; free(f->front);
@@ -2724,7 +2729,12 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (ev->button == 2) {                       /* right-click: cancel any in-flight connection, else context */
       if (f->conn_active) { flow_cancel_connection(f); return; }
       int id = flow_hit_node(f, scr);
-      if (id != -1 && f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
+      if (id != -1) {                            /* node occludes: an edge under the same cell never fires */
+        if (f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
+        return;
+      }
+      int ectx = flow_hit_edge(f, scr, 1);       /* same tolerance as the left-click edge path */
+      if (ectx != -1 && f->cb.on_edge_context) f->cb.on_edge_context(f, ectx, scr, f->cb.user);
       return;
     }
     if (ev->button == 0) {                       /* arm a press; classify on move/release */
@@ -2899,6 +2909,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       } else if (f->down_modsel) {
         /* shift/ctrl-click already applied on press: do NOT replace, do NOT fire on_node_click */
         f->last_click_node = -1;                 /* a modifier-click breaks any double-click pair */
+        f->last_click_edge = -1;
       } else if (f->down_node != -1) {
         flow_select_node(f, f->down_node, 0);
         if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
@@ -2908,15 +2919,25 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         } else {
           f->last_click_node = f->down_node;
         }
+        f->last_click_edge = -1;                 /* a node click breaks the edge dblclick pair */
       } else {
         int eclick = flow_hit_edge(f, scr, 1);   /* edge-body click-select before clearing/pane-click */
         if (eclick != -1) {
           flow_select_edge(f, eclick, 0);
+          /* edge observer trio, mirroring the node branch exactly: select -> click -> dblclick */
+          if (f->cb.on_edge_click) f->cb.on_edge_click(f, eclick, f->cb.user);
+          if (eclick == f->last_click_edge) {    /* 2nd consecutive click on the SAME edge: double-click */
+            if (f->cb.on_edge_dblclick) f->cb.on_edge_dblclick(f, eclick, f->cb.user); /* fires AFTER on_edge_click */
+            f->last_click_edge = -1;             /* consume the pair */
+          } else {
+            f->last_click_edge = eclick;
+          }
         } else {
           flow_clear_selection(f);
           if (f->cb.on_pane_click) f->cb.on_pane_click(f, flow_to_world(f, scr), f->cb.user);
+          f->last_click_edge = -1;               /* a pane click breaks the edge pair */
         }
-        f->last_click_node = -1;                 /* edge/pane click breaks a double-click pair */
+        f->last_click_node = -1;                 /* edge/pane click breaks the node pair */
       }
     } else if (f->moved && f->drag_node != -1 && flow_selected_count(f) == 1) {
       /* DRAG-TO-REPARENT (single-node drag only for v1). On drop, hit-test the cursor for a
