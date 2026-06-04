@@ -309,7 +309,7 @@ int flow_load(flow_t *f, const char *path) {
     if (flow__json_find(vp.p, vp.end, "ox", &field))   flow__json_float(field, &ox);
     if (flow__json_find(vp.p, vp.end, "oy", &field))   flow__json_float(field, &oy);
     if (flow__json_find(vp.p, vp.end, "zoom", &field)) flow__json_float(field, &zoom);
-    f->view.ox = ox; f->view.oy = oy; f->view.zoom = zoom;
+    flow__view_set(f, ox, oy, zoom);   /* restore-on-load fires on_viewport_change (graph is mid-rebuild: callback must not query nodes) */
   }
 
   int maxnid = 0, maxeid = 0;

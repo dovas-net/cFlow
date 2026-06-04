@@ -365,6 +365,7 @@ typedef struct {
   void (*on_node_dblclick)(flow_t *f, int node, void *user);              /* left double-click on a node body (fires AFTER on_node_click) */
   void (*on_selection_change)(flow_t *f, const int *ids, int n, void *user); /* fired after the FLOW_SELECTED node set changes; ids in insertion order, only on actual change */
   void (*on_nodes_delete)(flow_t *f, const int *ids, int n, void *user);  /* fired once per delete op with the removed node id set (a cascade reports its children) */
+  void (*on_viewport_change)(flow_t *f, flow_viewport vp, void *user);    /* fired after a pan/zoom/fit/load/extent-reclamp mutates the viewport; only on actual change (clamps applied BEFORE the compare); never journaled */
   void *user;
 } flow_callbacks;
 void flow_set_callbacks(flow_t *f, flow_callbacks cb);
@@ -657,9 +658,27 @@ static void flow__clamp_view_offset(flow_t *f) {
   lo = (float)f->rows - (float)(e.y + e.h) * z; hi = -(float)e.y * z;
   f->view.oy = lo > hi ? (lo + hi) / 2.0f : (f->view.oy < lo ? lo : (f->view.oy > hi ? hi : f->view.oy));
 }
+/* THE viewport seam: every mutation (pan, zoom, fit, load-restore, extent re-clamp)
+   routes through here. Clamps FIRST (translate extent), then fires on_viewport_change
+   iff the final viewport differs from the prior one — a write clamped back to the same
+   value fires nothing. Deliberately NOT journaled (spec §11) and NOT depth-guarded:
+   each re-entrant mutation compares against the by-then-current state, so a callback
+   whose mutation CONVERGES (re-applies the same value, or clamps back) terminates,
+   firing once per actual change. A callback that pans/zooms by a nonzero delta on
+   EVERY fire recurses unboundedly — apps must not; a cb_suppress-style depth guard
+   is the spec's deferred escape hatch if one ever proves needed. */
+static void flow__view_set(flow_t *f, float ox, float oy, float zoom) {
+  flow_viewport old = f->view;
+  f->view.ox = ox; f->view.oy = oy; f->view.zoom = zoom;
+  flow__clamp_view_offset(f);
+  if (memcmp(&old, &f->view, sizeof old) != 0 && f->cb.on_viewport_change)
+    f->cb.on_viewport_change(f, f->view, f->cb.user);
+}
 void flow_set_translate_extent(flow_t *f, flow_rect world) {
   f->translate_extent = world;
-  flow__clamp_view_offset(f);   /* re-clamp the live view immediately (precedent: flow_set_zoom_limits re-clamps zoom) */
+  /* re-clamp the live view immediately (precedent: flow_set_zoom_limits re-clamps
+     zoom); fires on_viewport_change iff the clamp actually moves the view */
+  flow__view_set(f, f->view.ox, f->view.oy, f->view.zoom);
 }
 void flow_move_node(flow_t *f, int id, flow_pt pos) {
   /* ABSOLUTE-in contract: `pos` is a world-absolute target. Store it parent-relative so
@@ -863,7 +882,7 @@ int flow_hit_node(flow_t *f, flow_pt screen) {
   free(order);
   return hit;
 }
-void flow_pan(flow_t *f, int dx, int dy) { f->view.ox += dx; f->view.oy += dy; flow__clamp_view_offset(f); }
+void flow_pan(flow_t *f, int dx, int dy) { flow__view_set(f, f->view.ox + dx, f->view.oy + dy, f->view.zoom); }
 flow_pt flow_to_screen(flow_t *f, flow_pt world_abs) { return flow_project(f->view, world_abs); }
 flow_pt flow_to_world(flow_t *f, flow_pt screen) { return flow_unproject(f->view, screen); }
 flow_viewport flow_view_get(flow_t *f) { return f->view; }
@@ -1098,10 +1117,8 @@ void flow_fit_view(flow_t *f, int margin) {
   float z = zx < zy ? zx : zy;
   if (z < f->zmin) z = f->zmin;
   if (z > f->zmax) z = f->zmax;
-  f->view.zoom = z;
-  f->view.ox = f->cols / 2.0f - (b.x + b.w / 2.0f) * z;
-  f->view.oy = f->rows / 2.0f - (b.y + b.h / 2.0f) * z;
-  flow__clamp_view_offset(f);                                 /* translate_extent wins over centering */
+  flow__view_set(f, f->cols / 2.0f - (b.x + b.w / 2.0f) * z,  /* seam clamps (extent wins over centering) + fires */
+                    f->rows / 2.0f - (b.y + b.h / 2.0f) * z, z);
 }
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_set_autopan(flow_t *f, int margin, int speed) {
@@ -1441,10 +1458,8 @@ void flow_set_zoom(flow_t *f, float zoom, flow_pt screen_center) {
   float z1 = zoom;
   if (z1 < f->zmin) z1 = f->zmin;
   if (z1 > f->zmax) z1 = f->zmax;
-  f->view.ox = screen_center.x - wx * z1;
-  f->view.oy = screen_center.y - wy * z1;
-  f->view.zoom = z1;
-  flow__clamp_view_offset(f);   /* translate_extent clamp AFTER the zoom write (zoom-aware range) */
+  flow__view_set(f, screen_center.x - wx * z1, screen_center.y - wy * z1, z1);
+  /* seam clamps with the NEW zoom (zoom-aware range) and fires on actual change */
 }
 void flow_zoom_in(flow_t *f, flow_pt screen_center)  { flow_set_zoom(f, f->view.zoom * FLOW_ZOOM_STEP, screen_center); }
 void flow_zoom_out(flow_t *f, flow_pt screen_center) { flow_set_zoom(f, f->view.zoom / FLOW_ZOOM_STEP, screen_center); }
@@ -2539,7 +2554,7 @@ int flow_load(flow_t *f, const char *path) {
     if (flow__json_find(vp.p, vp.end, "ox", &field))   flow__json_float(field, &ox);
     if (flow__json_find(vp.p, vp.end, "oy", &field))   flow__json_float(field, &oy);
     if (flow__json_find(vp.p, vp.end, "zoom", &field)) flow__json_float(field, &zoom);
-    f->view.ox = ox; f->view.oy = oy; f->view.zoom = zoom;
+    flow__view_set(f, ox, oy, zoom);   /* restore-on-load fires on_viewport_change (graph is mid-rebuild: callback must not query nodes) */
   }
 
   int maxnid = 0, maxeid = 0;
