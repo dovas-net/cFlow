@@ -83,6 +83,25 @@ static void on_pane(flow_t *f, flow_pt w, void *u) { (void)f;(void)w;(void)u; g_
 static void on_connect_ev(flow_t *f, int s, int t, void *u) {
   (void)f;(void)u; snprintf(g_event, sizeof g_event, "event: connect %d->%d", s, t);
 }
+/* edge observers (inc-4 #6): the context "menu" is a ticker entry naming the link's
+   endpoints; a plain click echoes too. Right-click a path cell to try it. */
+static void on_edge_ctx(flow_t *f, int edge, flow_pt scr, void *u) {
+  (void)scr;(void)u;
+  flow_edge *e = flow_get_edge(f, edge);
+  if (e) snprintf(g_event, sizeof g_event, "edge %d menu: %d->%d  [x deletes selected]", edge, e->source, e->target);
+  g_info_node = -1;                            /* edge menu replaces any node panel */
+}
+static void on_edge_click_ev(flow_t *f, int edge, void *u) {
+  (void)f;(void)u; snprintf(g_event, sizeof g_event, "event: edge click #%d", edge);
+}
+/* connect lifecycle (inc-4 #7): echo aborted/dropped gestures — successes are already
+   echoed by on_connect, so only the eid==-1 exits write the ticker here. */
+static void on_connect_end_ev(flow_t *f, int eid, int s, int t, void *u) {
+  (void)f;(void)u;
+  if (eid != -1) return;
+  if (t != -1) snprintf(g_event, sizeof g_event, "event: connect %d->%d rejected", s, t);
+  else         snprintf(g_event, sizeof g_event, "event: connect from %d aborted", s);
+}
 static void on_select_ev(flow_t *f, const int *ids, int n, void *u) {
   (void)f;(void)ids;(void)u;
   if (n > 0) snprintf(g_event, sizeof g_event, "event: select x%d", n);
@@ -183,6 +202,9 @@ int main(void) {
   cb.on_connect          = on_connect_ev;    /* events showcase: echo into the ticker */
   cb.on_selection_change = on_select_ev;
   cb.on_nodes_delete     = on_delete_ev;
+  cb.on_edge_context     = on_edge_ctx;      /* inc-4 #6: right-click an edge -> ticker menu */
+  cb.on_edge_click       = on_edge_click_ev;
+  cb.on_connect_end      = on_connect_end_ev;/* inc-4 #7: echo aborted/rejected gestures */
   flow_set_callbacks(f, cb);
   flow_set_minimap(f, 1, FLOW_CORNER_TR, 22, 7);
   flow_set_background(f, FLOW_BG_DOTS, 4);

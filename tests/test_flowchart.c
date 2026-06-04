@@ -117,6 +117,29 @@ int main(void) {
     ASSERT(s2->parent == -1 && v2->parent == -1, "'G' detached the children to top level");
   }
 
+  /* ---- inc-4 integration: prevent-cycles validator (#8 reachability x #9 gate) ---- */
+  {
+    int start2 = by_label(f, "start"), done2 = by_label(f, "done");
+    int ec = flow_edge_count(f);
+    ASSERT_INT(flow_add_edge(f, done2, start2, "", ""), -1,
+               "back-edge done->start rejected (would close a directed cycle)");
+    ASSERT_INT(flow_edge_count(f), ec, "  edge count unchanged on reject");
+    int fwd = flow_add_edge(f, start2, done2, "", "");
+    ASSERT(fwd != -1, "DAG-respecting edge start->done allowed through the validator");
+    flow_remove_edge(f, fwd);                          /* restore the chart */
+  }
+
+  /* ---- inc-4 integration: 'h' hides the selection, 'H' shows everything ---- */
+  {
+    int start2 = by_label(f, "start");
+    flow_select_node(f, start2, 0);
+    flow_feed(f, "h", 1);
+    ASSERT(flow_get_node(f, start2)->flags & FLOW_HIDDEN, "'h' hid the selected node");
+    ASSERT_INT(flow_selected_count(f), 0, "  hiding deselected it (engine rule)");
+    flow_feed(f, "H", 1);
+    ASSERT(!(flow_get_node(f, start2)->flags & FLOW_HIDDEN), "'H' shows all again");
+  }
+
   flow_free(f);
   return flowtest_report("test_flowchart");
 }
