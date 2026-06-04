@@ -2,15 +2,17 @@
 #include "../flow.h"
 #include "flowtest.h"
 
-static int ctx_node = -2, pane_clicks = 0;
+static int ctx_node = -2, pane_clicks = 0, sel_changes = 0;
 static void on_ctx(flow_t *f, int n, flow_pt s, void *u) { (void)f;(void)s;(void)u; ctx_node = n; }
 static void on_pane(flow_t *f, flow_pt w, void *u) { (void)f;(void)w;(void)u; pane_clicks++; }
+static void on_selchange(flow_t *f, const int *ids, int n, void *u) { (void)f;(void)ids;(void)n;(void)u; sel_changes++; }
 
 int main(void) {
   flow_t *f = flow_new(80, 24); flow_register_defaults(f);
   int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");  /* rect (10,5,5,3) */
   int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
   flow_callbacks cb = {0}; cb.on_node_context = on_ctx; cb.on_pane_click = on_pane;
+  cb.on_selection_change = on_selchange;
   flow_set_callbacks(f, cb);
 
   /* click (press+release, same cell) inside A selects it */
@@ -66,6 +68,17 @@ int main(void) {
   flow_feed(f, "\x1b[<0;32;7M", 10); flow_feed(f, "\x1b[<0;32;7m", 10);
   ASSERT_INT(flow_selected_count(f), 1, "plain click B replaces -> 1 selected");
   ASSERT_INT(flow_selected_node(f), b, "plain click B -> only B selected");
+
+  /* ---- lone ESC clears selection (sig-gated on_selection_change) ---- */
+  flow_select_node(f, a, 0); flow_select_node(f, b, 1);   /* {A,B} */
+  ASSERT_INT(flow_selected_count(f), 2, "ESC test precondition: 2 selected");
+  sel_changes = 0;
+  flow_feed(f, "\x1b", 1);                                /* lone ESC, not a CSI prefix */
+  ASSERT_INT(flow_selected_count(f), 0, "lone ESC clears selection");
+  ASSERT_INT(sel_changes, 1, "on_selection_change fired once on ESC clear");
+  flow_feed(f, "\x1b", 1);                                /* ESC again: already empty */
+  ASSERT_INT(flow_selected_count(f), 0, "second ESC: selection still empty");
+  ASSERT_INT(sel_changes, 1, "second ESC fires NO event (sig-gated)");
 
   flow_free(f);
   return flowtest_report("test_select");
