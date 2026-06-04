@@ -1488,6 +1488,17 @@ int flow_incomers(flow_t *f, int node, int *out, int max);        /* distinct so
 int flow_outgoers(flow_t *f, int node, int *out, int max);        /* distinct target nodes reachable FROM node (same dedup) */
 int flow_connected_edges(flow_t *f, int node, int *out, int max); /* EVERY edge id incident on node (either endpoint; no dedup) */
 
+/* spatial intersection queries (inc-4 #10, xyflow getIntersectingNodes): closed
+   convention via flow_rect_intersects ("touching edges count", flow_geom.h) over
+   flow_node_rect_abs. Ancestor pairs are NOT filtered — a group and its nested child
+   both report when their rects overlap; apps exclude via flow_is_ancestor if desired.
+   MODEL-level like the traversal queries: ALL nodes are swept, with no view-state
+   filtering — hidden nodes (#11's FLOW_HIDDEN) stay included here even though
+   view-layer marquee selection (flow_select_in_rect, the other flow_rect_intersects
+   caller) skips them. Deliberate layering, not a missed filter site. */
+int flow_intersecting_nodes(flow_t *f, flow_rect world, int *out, int max); /* all nodes whose absolute rect intersects `world` */
+int flow_node_intersections(flow_t *f, int node, int *out, int max);        /* nodes intersecting `node`'s absolute rect, EXCLUDING node itself; missing id -> 0 */
+
 #ifdef FLOW_IMPLEMENTATION
 /* shared walk: dir 0 = incomers (edges INTO node, emit sources), dir 1 = outgoers
    (edges FROM node, emit targets). Dedup without allocation: for each candidate,
@@ -1529,6 +1540,27 @@ int flow_connected_edges(flow_t *f, int node, int *out, int max) {
     count++;
   }
   return count;
+}
+/* shared rect sweep: nodes whose abs rect intersects `world`, skipping id `excl`
+   (-1 = none). Same fill-buffer idiom as the traversal queries above. */
+static int flow__rect_sweep(flow_t *f, flow_rect world, int excl, int *out, int max) {
+  int count = 0;
+  for (int i = 0; i < f->nnodes; i++) {
+    flow_node *n = &f->nodes[i];
+    if (n->id == excl) continue;
+    if (!flow_rect_intersects(world, flow_node_rect_abs(f, n))) continue;
+    if (count < max && out) out[count] = n->id;
+    count++;
+  }
+  return count;
+}
+int flow_intersecting_nodes(flow_t *f, flow_rect world, int *out, int max) {
+  return flow__rect_sweep(f, world, -1, out, max);
+}
+int flow_node_intersections(flow_t *f, int node, int *out, int max) {
+  flow_node *n = flow_get_node(f, node);
+  if (!n) return 0;
+  return flow__rect_sweep(f, flow_node_rect_abs(f, n), node, out, max);
 }
 #endif
 /* ===================== src/flow_view.h ===================== */

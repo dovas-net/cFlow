@@ -116,5 +116,86 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ============ spatial intersection queries (inc-4 #10, same module) ============
+     NOTE: the spec's example coordinates for this package are internally inconsistent
+     (its query rect cannot reach B and does hit D); the rects below are hand-verified
+     against flow_rect_intersects' closed convention instead. */
+
+  /* ---- region query: overlapping rects in insertion order; non-overlap excluded ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5},  (void*)"B");
+    int c = flow_add_node(f, "default", (flow_pt){20, 10}, (void*)"C");
+    int d = flow_add_node(f, "default", (flow_pt){10, 10}, (void*)"D");
+    flow_get_node(f, a)->w = 5; flow_get_node(f, a)->h = 3;   /* [10,15]x[5,8]   */
+    flow_get_node(f, b)->w = 5; flow_get_node(f, b)->h = 3;   /* [30,35]x[5,8]   */
+    flow_get_node(f, c)->w = 4; flow_get_node(f, c)->h = 4;   /* [20,24]x[10,14] */
+    flow_get_node(f, d)->w = 6; flow_get_node(f, d)->h = 3;   /* [10,16]x[10,13] */
+    int out[8];
+    ASSERT_INT(flow_intersecting_nodes(f, (flow_rect){12, 6, 10, 6}, out, 8), 3,
+               "region [12,22]x[6,12] hits A, C, D");
+    ASSERT_INT(out[0], a, "  [0]==A (insertion order)");
+    ASSERT_INT(out[1], c, "  [1]==C");
+    ASSERT_INT(out[2], d, "  [2]==D");
+    /* closed convention: a rect STARTING at A's right edge (x=15) touches; x=16 misses */
+    ASSERT_INT(flow_intersecting_nodes(f, (flow_rect){15, 5, 2, 3}, out, 8), 1,
+               "edge-touch at x==15 counts (closed convention, flow_rect_intersects)");
+    ASSERT_INT(out[0], a, "  the touch is A");
+    ASSERT_INT(flow_intersecting_nodes(f, (flow_rect){16, 5, 2, 3}, out, 8), 0,
+               "one cell past the edge misses");
+    /* buffer overflow: true count, no write past max */
+    int small[2] = {-7, -7};
+    ASSERT_INT(flow_intersecting_nodes(f, (flow_rect){12, 6, 10, 6}, small, 1), 3,
+               "max=1 still returns true count 3");
+    ASSERT_INT(small[0], a, "  small[0] filled");
+    ASSERT_INT(small[1], -7, "  small[1] untouched");
+    flow_free(f);
+  }
+
+  /* ---- node convenience: intersectors of a node's rect, excluding itself ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    int e = flow_add_node(f, "default", (flow_pt){14, 7}, (void*)"E");
+    flow_get_node(f, a)->w = 5; flow_get_node(f, a)->h = 3;   /* [10,15]x[5,8]  */
+    flow_get_node(f, b)->w = 5; flow_get_node(f, b)->h = 3;   /* far away       */
+    flow_get_node(f, e)->w = 4; flow_get_node(f, e)->h = 3;   /* [14,18]x[7,10] overlaps A */
+    int out[8];
+    ASSERT_INT(flow_node_intersections(f, a, out, 8), 1, "A intersects exactly E");
+    ASSERT_INT(out[0], e, "  [0]==E");
+    ASSERT(out[0] != a, "  A itself excluded");
+    ASSERT_INT(flow_node_intersections(f, b, out, 8), 0, "isolated B intersects nothing");
+    ASSERT_INT(flow_node_intersections(f, 9999, out, 8), 0, "missing id returns 0 gracefully");
+    flow_free(f);
+  }
+
+  /* ---- parent/child rect overlap is returned, NOT filtered (apps use flow_is_ancestor) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int p = flow_add_node(f, "group", (flow_pt){10, 5}, NULL);
+    flow_get_node(f, p)->w = 20; flow_get_node(f, p)->h = 10;  /* [10,30]x[5,15] */
+    int k = flow_add_node(f, "default", (flow_pt){12, 7}, (void*)"k");
+    flow_get_node(f, k)->w = 4; flow_get_node(f, k)->h = 3;
+    flow_set_parent(f, k, p);
+    int out[8];
+    ASSERT_INT(flow_intersecting_nodes(f, (flow_rect){0, 0, 60, 24}, out, 8), 2,
+               "region query returns parent AND nested child (no ancestor filtering)");
+    ASSERT_INT(flow_node_intersections(f, p, out, 8), 1, "parent's intersections include its child");
+    ASSERT_INT(out[0], k, "  the child");
+    ASSERT_INT(flow_is_ancestor(f, p, k), 1, "  (apps filter via flow_is_ancestor when desired)");
+    flow_free(f);
+  }
+
+  /* ---- empty graph ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int out[4];
+    ASSERT_INT(flow_intersecting_nodes(f, (flow_rect){0, 0, 100, 100}, out, 4), 0,
+               "empty graph: region query 0");
+    flow_free(f);
+  }
+
   return flowtest_report("test_query");
 }
