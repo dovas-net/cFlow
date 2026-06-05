@@ -315,6 +315,8 @@ int  flow_dispatch_key(flow_t *f, const char *seq, int n); /* run a binding/buil
 void flow_delete_selection(flow_t *f);     /* built-in: remove selected node(s) then selected edge */
 int  flow_add_node_center(flow_t *f, const char *type, void *data); /* add at world point under viewport center; returns id */
 void flow_fit_view(flow_t *f, int margin); /* getViewportForBounds: pick zoom+pan so flow_bounds fits with `margin` cells of padding (zoom clamped to [zmin,zmax]); no-op when empty */
+flow_rect flow_bounds_of(flow_t *f, const int *ids, int n); /* union of the ABSOLUTE rects of the n nodes named in ids[] — INCLUDES hidden nodes (explicit-id MODEL-level query, unlike flow_bounds); missing ids skip; zero rect on n<=0/NULL/none-resolve */
+void flow_fit_bounds(flow_t *f, flow_rect r, int margin);   /* frame world rect r with `margin` cells of padding (zoom clamped to [zmin,zmax]); shares flow_fit_view's math; no-op when r.w<=0||r.h<=0 */
 void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom help/status line */
 /* hidden flags (inc-4 #11) — VIEW-level visibility, MODEL-level presence. A hidden
    node is skipped by render, hit-tests, marquee selection, bounds/fit and the
@@ -1173,14 +1175,12 @@ int flow_add_node_center(flow_t *f, const char *type, void *data) {
   flow__undo_end(f);
   return id;
 }
-void flow_fit_view(flow_t *f, int margin) {
-  /* getViewportForBounds: pick a zoom that makes flow_bounds fit inside the usable
-     area (cols/rows minus `margin` cells of padding on each side), clamped to the
-     [zmin,zmax] range, then pan so the bounds centre lands on the screen centre.
-     One editable definition — the zoom package made this zoom-aware in place. */
-  if (f->nnodes == 0) return;                                 /* empty: no-op */
-  flow_rect b = flow_bounds(f);
-  if (b.w <= 0 || b.h <= 0) return;
+/* getViewportForBounds: pick a zoom that makes rect b fit inside the usable area
+   (cols/rows minus `margin` cells of padding on each side), clamped to the
+   [zmin,zmax] range, then pan so the rect centre lands on the screen centre.
+   One editable definition — shared by flow_fit_view and flow_fit_bounds (inc-5 #4);
+   callers guard b.w/b.h > 0. */
+static void flow__fit_rect(flow_t *f, flow_rect b, int margin) {
   float zx = (float)(f->cols - 2 * margin) / (float)b.w;
   float zy = (float)(f->rows - 2 * margin) / (float)b.h;
   float z = zx < zy ? zx : zy;
@@ -1188,6 +1188,30 @@ void flow_fit_view(flow_t *f, int margin) {
   if (z > f->zmax) z = f->zmax;
   flow__view_set(f, f->cols / 2.0f - (b.x + b.w / 2.0f) * z,  /* seam clamps (extent wins over centering) + fires */
                     f->rows / 2.0f - (b.y + b.h / 2.0f) * z, z);
+}
+void flow_fit_view(flow_t *f, int margin) {
+  if (f->nnodes == 0) return;                                 /* empty: no-op */
+  flow_rect b = flow_bounds(f);
+  if (b.w <= 0 || b.h <= 0) return;                           /* fully hidden: no-op */
+  flow__fit_rect(f, b, margin);
+}
+void flow_fit_bounds(flow_t *f, flow_rect r, int margin) {
+  if (r.w <= 0 || r.h <= 0) return;                           /* degenerate rect: no-op */
+  flow__fit_rect(f, r, margin);
+}
+flow_rect flow_bounds_of(flow_t *f, const int *ids, int n) {
+  /* explicit-id sibling of flow_bounds: MODEL-level (a caller who NAMED these nodes
+     gets what they named, hidden included — matching the flow_query.h family), so no
+     flow__node_visible skip. Missing ids skip (query convention: "missing id -> 0"). */
+  flow_rect b = {0, 0, 0, 0}; int seeded = 0;
+  if (!ids || n <= 0) return b;
+  for (int i = 0; i < n; i++) {
+    flow_node *nd = flow_get_node(f, ids[i]);
+    if (!nd) continue;
+    flow_rect r = flow_node_rect_abs(f, nd);
+    b = seeded ? flow_rect_union(b, r) : r; seeded = 1;
+  }
+  return b;
 }
 void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void *user) {
   f->validator_fn = fn; f->validator_user = user;   /* NULL fn = allow all (default) */
@@ -1632,6 +1656,7 @@ void  flow_zoom_in(flow_t *f, flow_pt screen_center);             /* multiply zo
 void  flow_zoom_out(flow_t *f, flow_pt screen_center);            /* divide  zoom by FLOW_ZOOM_STEP, pointer-centered */
 float flow_zoom(flow_t *f);                                       /* current viewport zoom */
 void  flow_set_zoom_limits(flow_t *f, float zmin, float zmax);    /* override the default [zmin,zmax] clamp range */
+void  flow_set_center(flow_t *f, int wx, int wy, float zoom);     /* pan so world (wx,wy) lands on the screen centre; zoom>0 re-zooms (clamped to [zmin,zmax]), zoom<=0 keeps current (inc-5 #4) */
 int   flow_lod_for_zoom(flow_t *f, float zoom);                   /* public form of the shared LOD helper: 0 = full, 1 = collapsed */
 
 #ifdef FLOW_IMPLEMENTATION
@@ -1656,6 +1681,16 @@ void flow_set_zoom(flow_t *f, float zoom, flow_pt screen_center) {
 }
 void flow_zoom_in(flow_t *f, flow_pt screen_center)  { flow_set_zoom(f, f->view.zoom * FLOW_ZOOM_STEP, screen_center); }
 void flow_zoom_out(flow_t *f, flow_pt screen_center) { flow_set_zoom(f, f->view.zoom / FLOW_ZOOM_STEP, screen_center); }
+void flow_set_center(flow_t *f, int wx, int wy, float zoom) {
+  /* the seam clamps OFFSET only — zoom-writing callers clamp first (flow_set_zoom
+     precedent above); zoom<=0 is the keep-current sentinel, with the same lazy-1.0
+     guard. FLOAT halves (cols/2.0f) or the centre drifts half a cell on odd sizes. */
+  float z = zoom > 0.0f
+              ? (zoom < f->zmin ? f->zmin : (zoom > f->zmax ? f->zmax : zoom))
+              : (f->view.zoom == 0.0f ? 1.0f : f->view.zoom);
+  flow__view_set(f, f->cols / 2.0f - (float)wx * z,
+                    f->rows / 2.0f - (float)wy * z, z);
+}
 int flow_lod_for_zoom(flow_t *f, float zoom) { return flow__lod_for(f, zoom); }
 #endif
 /* ===================== src/flow_layout.h ===================== */

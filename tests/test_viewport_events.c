@@ -132,5 +132,144 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ================= framing primitives (inc-5 #4) ================= */
+
+  /* ---- flow_set_center: centers, fires once, idempotent re-call fires nothing ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_callbacks cb = {0}; cb.on_viewport_change = on_vp; flow_set_callbacks(f, cb);
+    vp_fires = 0;
+    flow_set_center(f, 100, 50, -1.0f);            /* keep zoom (=1) */
+    ASSERT_INT(vp_fires, 1, "set_center fires once");
+    ASSERT_F(f->view.ox, -60.0f, "ox = cols/2 - wx*z = 40-100");
+    ASSERT_F(f->view.oy, -38.0f, "oy = rows/2 - wy*z = 12-50");
+    ASSERT_F(f->view.zoom, 1.0f, "zoom<=0 keeps current zoom");
+    flow_set_center(f, 100, 50, -1.0f);            /* identical -> no fire */
+    ASSERT_INT(vp_fires, 1, "idempotent set_center fires nothing");
+    flow_free(f);
+  }
+
+  /* ---- flow_set_center: explicit zoom clamps to [zmin,zmax] ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_set_zoom_limits(f, 0.5f, 2.0f);
+    flow_set_center(f, 0, 0, 100.0f);
+    ASSERT_F(f->view.zoom, 2.0f, "explicit zoom clamped to zmax");
+    ASSERT_F(f->view.ox, 40.0f, "centering uses the clamped zoom (40 - 0*2)");
+    flow_free(f);
+  }
+
+  /* ---- flow_set_center: zoom<=0 keeps a non-1 current zoom ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_zoom_in(f, (flow_pt){40, 12});
+    float z = f->view.zoom;
+    ASSERT(z > 1.0f, "precondition: zoomed in");
+    flow_set_center(f, 10, 10, 0.0f);
+    ASSERT_F(f->view.zoom, z, "zoom 0 keeps current");
+    ASSERT_F(f->view.ox, 40.0f - 10.0f * z, "centering uses the kept zoom");
+    flow_free(f);
+  }
+
+  /* ---- flow_set_center: clamp-first under a translate extent ---- */
+  {
+    flow_t *f = flow_new(60, 10); flow_register_defaults(f);
+    flow_callbacks cb = {0}; cb.on_viewport_change = on_vp; flow_set_callbacks(f, cb);
+    flow_set_translate_extent(f, (flow_rect){0, 0, 40, 40});  /* x degenerate: ox pinned 10 */
+    vp_fires = 0;
+    flow_set_center(f, 0, 8, -1.0f);   /* raw (30,-3): ox pins to 10, oy -3 in range */
+    ASSERT_INT(vp_fires, 1, "extent-pinned set_center fires once (oy changed)");
+    ASSERT_F(vp_last.ox, 10.0f, "delivered ox is the PINNED value, not the raw 30");
+    ASSERT_F(vp_last.oy, -3.0f, "oy clamped within range");
+    flow_free(f);
+  }
+
+  /* ---- flow_fit_bounds(flow_bounds(f)) == flow_fit_view (shared math) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    flow_add_node(f, "default", (flow_pt){60, 18}, (void*)"B");
+    flow_add_node(f, "default", (flow_pt){30, 10}, (void*)"C");
+    flow_fit_view(f, 2);
+    float fx = f->view.ox, fy = f->view.oy, fz = f->view.zoom;
+    flow_pan(f, 13, 7);                                /* move away */
+    flow_fit_bounds(f, flow_bounds(f), 2);
+    ASSERT_F(f->view.ox, fx, "fit_bounds(all-node rect) == fit_view: ox");
+    ASSERT_F(f->view.oy, fy, "  oy");
+    ASSERT_F(f->view.zoom, fz, "  zoom");
+
+    /* zero-rect no-op */
+    flow_callbacks cb = {0}; cb.on_viewport_change = on_vp; flow_set_callbacks(f, cb);
+    vp_fires = 0;
+    flow_fit_bounds(f, (flow_rect){5, 5, 0, 0}, 2);
+    ASSERT_INT(vp_fires, 0, "zero-rect fit_bounds is a no-op (no fire)");
+    ASSERT_F(f->view.ox, fx, "  view untouched");
+    flow_free(f);
+  }
+
+  /* ---- flow_bounds_of: subset, hidden-inclusion divergence, child abs, degenerate ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){60, 18}, (void*)"B");
+    int c = flow_add_node(f, "default", (flow_pt){30, 10}, (void*)"C");
+
+    /* subset excludes non-listed */
+    int one[1] = { a };
+    flow_rect r1 = flow_bounds_of(f, one, 1);
+    ASSERT_INT(r1.x, 10, "bounds_of({a}).x");
+    ASSERT_INT(r1.y, 5,  "bounds_of({a}).y");
+    ASSERT_INT(r1.w, 5,  "bounds_of({a}).w (single node, not the graph)");
+    ASSERT_INT(r1.h, 3,  "bounds_of({a}).h");
+
+    /* INCLUDES a hidden id — the model-level divergence from flow_bounds */
+    flow_set_node_hidden(f, b, 1);
+    int two[2] = { a, b };
+    flow_rect r2 = flow_bounds_of(f, two, 2);
+    ASSERT_INT(r2.x, 10, "bounds_of includes hidden b: x");
+    ASSERT_INT(r2.w, 55, "  spans to hidden b (x10..65)");
+    ASSERT_INT(r2.h, 16, "  spans to hidden b (y5..21)");
+    flow_rect vb = flow_bounds(f);
+    ASSERT(vb.w != r2.w, "flow_bounds (view-level) skips hidden b — they diverge");
+    flow_set_node_hidden(f, b, 0);
+
+    /* child contributes its ABSOLUTE rect */
+    flow_set_parent(f, c, a);                          /* preserves abs position */
+    int kid[1] = { c };
+    flow_rect r3 = flow_bounds_of(f, kid, 1);
+    ASSERT_INT(r3.x, 30, "child id: absolute x (parent offset applied)");
+    ASSERT_INT(r3.y, 10, "  absolute y");
+
+    /* degenerate inputs: zero rect, no crash */
+    flow_rect z1 = flow_bounds_of(f, NULL, 0);
+    ASSERT_INT(z1.w, 0, "bounds_of(NULL,0) = zero rect");
+    flow_rect z2 = flow_bounds_of(f, one, 0);
+    ASSERT_INT(z2.w, 0, "bounds_of(ids,0) = zero rect");
+    int missing = 9999;
+    flow_rect z3 = flow_bounds_of(f, &missing, 1);
+    ASSERT_INT(z3.w, 0, "bounds_of(missing id) = zero rect");
+    flow_free(f);
+  }
+
+  /* ---- odd-dimension centering uses FLOAT halves (no half-cell drift) ---- */
+  {
+    flow_t *o = flow_new(81, 25); flow_register_defaults(o);
+    flow_set_center(o, 0, 0, -1.0f);
+    ASSERT_F(o->view.ox, 40.5f, "odd-width center uses float halves (not 40)");
+    ASSERT_F(o->view.oy, 12.5f, "odd-height center uses float halves");
+    flow_free(o);
+  }
+
+  /* ---- framing is never journaled ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int jn = f->journal.n;                       /* the add itself journals one op */
+    flow_set_center(f, 50, 50, 2.0f);
+    flow_fit_bounds(f, (flow_rect){0, 0, 30, 20}, 1);
+    ASSERT_INT(f->journal.n, jn, "set_center/fit_bounds journal nothing");
+    flow_free(f);
+  }
+
   return flowtest_report("test_viewport_events");
 }

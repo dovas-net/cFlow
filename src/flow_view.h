@@ -4,6 +4,7 @@ void  flow_zoom_in(flow_t *f, flow_pt screen_center);             /* multiply zo
 void  flow_zoom_out(flow_t *f, flow_pt screen_center);            /* divide  zoom by FLOW_ZOOM_STEP, pointer-centered */
 float flow_zoom(flow_t *f);                                       /* current viewport zoom */
 void  flow_set_zoom_limits(flow_t *f, float zmin, float zmax);    /* override the default [zmin,zmax] clamp range */
+void  flow_set_center(flow_t *f, int wx, int wy, float zoom);     /* pan so world (wx,wy) lands on the screen centre; zoom>0 re-zooms (clamped to [zmin,zmax]), zoom<=0 keeps current (inc-5 #4) */
 int   flow_lod_for_zoom(flow_t *f, float zoom);                   /* public form of the shared LOD helper: 0 = full, 1 = collapsed */
 
 #ifdef FLOW_IMPLEMENTATION
@@ -28,5 +29,15 @@ void flow_set_zoom(flow_t *f, float zoom, flow_pt screen_center) {
 }
 void flow_zoom_in(flow_t *f, flow_pt screen_center)  { flow_set_zoom(f, f->view.zoom * FLOW_ZOOM_STEP, screen_center); }
 void flow_zoom_out(flow_t *f, flow_pt screen_center) { flow_set_zoom(f, f->view.zoom / FLOW_ZOOM_STEP, screen_center); }
+void flow_set_center(flow_t *f, int wx, int wy, float zoom) {
+  /* the seam clamps OFFSET only — zoom-writing callers clamp first (flow_set_zoom
+     precedent above); zoom<=0 is the keep-current sentinel, with the same lazy-1.0
+     guard. FLOAT halves (cols/2.0f) or the centre drifts half a cell on odd sizes. */
+  float z = zoom > 0.0f
+              ? (zoom < f->zmin ? f->zmin : (zoom > f->zmax ? f->zmax : zoom))
+              : (f->view.zoom == 0.0f ? 1.0f : f->view.zoom);
+  flow__view_set(f, f->cols / 2.0f - (float)wx * z,
+                    f->rows / 2.0f - (float)wy * z, z);
+}
 int flow_lod_for_zoom(flow_t *f, float zoom) { return flow__lod_for(f, zoom); }
 #endif
