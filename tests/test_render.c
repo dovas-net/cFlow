@@ -368,6 +368,38 @@ int main(void) {
     flow_free(h);
   }
 
+  /* ---- minimap all-hidden + panned: viewport rect must track the screen window
+     (inc-5 #1). The world-window guard must fall to the `: vp` branch when every
+     node is hidden, exactly like an empty graph — flow_bounds returns {0,0,0,0}
+     there, and unioning that zero rect treats it as a point AT the world origin,
+     inflating W.h (12 -> 40 under pan(40,40)) and compressing the drawn rect. ---- */
+  {
+    flow_t *am = flow_new(40, 12); flow_register_defaults(am);
+    flow_cell *amb = (flow_cell*)malloc((size_t)40 * 12 * sizeof(flow_cell));
+    int na = flow_add_node(am, "default", (flow_pt){0, 0}, (void*)"A");
+    int nb = flow_add_node(am, "default", (flow_pt){8, 4}, (void*)"B");
+    flow_set_minimap(am, 1, FLOW_CORNER_BR, 12, 6);   /* bw=12 bh=6 -> iw=10 ih=4 */
+    flow_set_node_hidden(am, na, 1);
+    flow_set_node_hidden(am, nb, 1);
+    flow_pan(am, 40, 40);                /* no translate extent set -> sticks */
+    flow_render(am, amb, 40, 12);
+    /* fixed W == vp == {-40,-40,40,12} -> vy2 = 11*4/12 = 3 = ih-1: the rect reaches
+       the interior bottom row. Buggy W = {-40,-40,40,40} -> vy2 = 11*4/40 = 1: it
+       stops two interior rows short. Top row + corners are identical in both rects —
+       assert only the lower cells that exist solely in the fixed rect.
+       BR minimap interior on 40x12: screen x=29..38, y=7..10. */
+    ASSERT_INT(amb[10*40 + 33].ch, 0x2500, "vp bottom line at interior bottom row");
+    ASSERT_INT(amb[9*40 + 29].ch, 0x2502, "vp left line reaches lower interior");
+    int amdots = 0;
+    for (int i = 0; i < 40 * 12; i++)
+      if (amb[i].ch == 0x2022 || amb[i].ch == 0x25C9) amdots++;
+    ASSERT_INT(amdots, 0, "all-hidden minimap draws no node dots");
+    char *ams = cells_to_string(amb, 40, 12);
+    SNAPSHOT("render_minimap_all_hidden", ams);  /* full-interior vp rect, no dots */
+    free(ams);
+    free(amb); flow_free(am);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

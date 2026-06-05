@@ -2197,7 +2197,11 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
   flow_pt w0 = flow_to_world(f, (flow_pt){0, 0});
   flow_pt w1 = flow_to_world(f, (flow_pt){cb->w, cb->h});
   flow_rect vp = { w0.x, w0.y, w1.x - w0.x, w1.y - w0.y };
-  flow_rect W = f->nnodes ? flow_rect_union(flow_bounds(f), vp) : vp;
+  /* visible footprint, not node count: flow_bounds is visible-only and returns a
+     zero rect when the graph is empty OR fully hidden — unioning that zero rect
+     would treat it as a point at the world origin and mis-scale the viewport rect */
+  flow_rect b = flow_bounds(f);
+  flow_rect W = (b.w > 0 || b.h > 0) ? flow_rect_union(b, vp) : vp;
   if (W.w < 1) W.w = 1; if (W.h < 1) W.h = 1;
   /* viewport rectangle first, node dots on top */
   int vx  = (vp.x - W.x) * iw / W.w,             vy  = (vp.y - W.y) * ih / W.h;
