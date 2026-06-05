@@ -16,6 +16,13 @@ static flow_t *mkgraph(int *a, int *b, int *c) {
   return f;
 }
 
+/* synthetic shift SGR-1006 helpers at 0-based cells (duplicated from test_autopan.c —
+   they are static there, not in flowtest.h) */
+static void ws_feed(flow_t *f, const char *s)            { flow_feed(f, s, (int)strlen(s)); }
+static void ws_press_shift(flow_t *f, int sx, int sy)    { char b[32]; snprintf(b, sizeof b, "\x1b[<4;%d;%dM",  sx + 1, sy + 1); ws_feed(f, b); }
+static void ws_move_shift(flow_t *f, int sx, int sy)     { char b[32]; snprintf(b, sizeof b, "\x1b[<36;%d;%dM", sx + 1, sy + 1); ws_feed(f, b); }
+static void ws_release_shift(flow_t *f, int sx, int sy)  { char b[32]; snprintf(b, sizeof b, "\x1b[<4;%d;%dm",  sx + 1, sy + 1); ws_feed(f, b); }
+
 int main(void) {
   int a, b, c;
 
@@ -119,6 +126,54 @@ int main(void) {
     ASSERT(flow_get_node(f, a)->flags & FLOW_SELECTED, "  A selected");
     ASSERT(!(flow_get_node(f, b)->flags & FLOW_SELECTED), "  hidden B not selected");
     flow_free(f);
+  }
+
+  /* ---- WORLD-STABLE ANCHOR (inc-5 deferral #1): under sustained edge-band
+     auto-pan the marquee rect must GROW from the press point's world position,
+     not translate with the screen anchor. ---- */
+  {
+    /* 80x24, zoom 1, margin 3 / speed 2: right band x>=77, bottom band y>=21;
+       each in-band shift-motion pans the view (-2,-2). Press (50,10) on empty
+       pane (A is BESIDE the anchor at world x52..56 y12..14, never under it).
+       Far (x95..99 y30..32) is off-screen at press; enters the grown rect only
+       after sustained pan. After 9 motions at (79,22): ox=oy=-18, world cursor
+       = (97,40), rect (50,10)..(97,40) covers BOTH A and Far. Under the old
+       screen-pinned anchor the rect would be (68,28)..(97,40) — off A. */
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int A   = flow_add_node(f, "default", (flow_pt){52, 12}, (void*)"A");
+    int Far = flow_add_node(f, "default", (flow_pt){95, 30}, (void*)"F");
+    ws_press_shift(f, 50, 10);
+    ws_move_shift(f, 79, 22);                /* arms + first in-band pan */
+    ASSERT_INT(f->marquee_on, 1, "world-anchor: marquee armed");
+    ASSERT(f->view.ox != 0.0f && f->view.oy != 0.0f, "world-anchor: auto-pan fired (precondition)");
+    for (int i = 0; i < 8; i++) ws_move_shift(f, 79, 22);   /* 9 in-band motions total */
+    ASSERT(flow_get_node(f, A)->flags & FLOW_SELECTED,
+           "world-anchor: node beside the ORIGINAL anchor still selected (rect grew)");
+    ASSERT(flow_get_node(f, Far)->flags & FLOW_SELECTED,
+           "world-anchor: far node swept up by the grown rect");
+    ASSERT(flow_selected_count(f) >= 2, "world-anchor: rect expanded across the pan");
+    ws_release_shift(f, 79, 22);
+    ASSERT_INT(f->marquee_on, 0, "world-anchor: release clears marquee");
+    ASSERT(flow_selected_count(f) >= 2, "world-anchor: release keeps the selection");
+    flow_free(f);
+
+    /* zoom != 1: the world<->screen round-trip is exercised, not bypassed.
+       zoom 2 about screen (40,12): ox=-40, oy=-12. Press (50,10) -> world
+       (45,11) exactly. Node Z at world (47,12) (screen x54..62 y12..16, not
+       under the press). Short sweep to (60,16): no band touched, no pan. */
+    flow_t *g = flow_new(80, 24); flow_register_defaults(g);
+    int Z = flow_add_node(g, "default", (flow_pt){47, 12}, (void*)"Z");
+    flow_set_zoom(g, 2.0f, (flow_pt){40, 12});
+    ws_press_shift(g, 50, 10);
+    ws_move_shift(g, 60, 16);
+    ASSERT_INT(g->marquee_on, 1, "zoom2: marquee armed");
+    flow_pt rp = flow_to_screen(g, g->marquee_anchor_world);
+    ASSERT(rp.x >= 49 && rp.x <= 51 && rp.y >= 9 && rp.y <= 11,
+           "zoom2: world anchor re-projects within +/-1 of the press cell");
+    ASSERT(flow_get_node(g, Z)->flags & FLOW_SELECTED, "zoom2: swept node selected through the round-trip");
+    ws_release_shift(g, 60, 16);
+    ASSERT_INT(g->marquee_on, 0, "zoom2: release clears marquee");
+    flow_free(g);
   }
 
   return flowtest_report("test_marquee");

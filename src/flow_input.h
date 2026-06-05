@@ -172,7 +172,9 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
       f->moved = 1;                              /* threshold crossed: begin drag, marquee, or pan */
       if (f->marquee_active) {
-        f->marquee_on = 1; f->marquee_anchor = f->down_pos;
+        f->marquee_on = 1;
+        f->marquee_anchor_world = flow_to_world(f, f->down_pos);  /* world-pin ONCE,
+          before any auto-pan — same shape as drag_grab/drag_last_world below */
       } else if (f->down_node != -1) {
         flow_node *nd = flow_get_node(f, f->down_node);
         flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
@@ -187,12 +189,14 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       }
     }
     if (f->marquee_on) {                          /* live marquee: replace-select within the box */
-      /* pan FIRST, then re-select at post-pan world coords (same order as node-drag):
-         the rect below is recomputed from the NEW view, so the marquee chases the
-         screen-coordinate anchor as the world scrolls and the selection tracks it. */
+      /* pan FIRST, then re-select at post-pan world coords (same order as node-drag).
+         The anchor corner is the WORLD point pinned at threshold-cross, so as auto-pan
+         scrolls the view only the cursor corner moves in world — the rect GROWS from
+         the press point (world-stable selection, inc-5 #3) instead of chasing the
+         screen anchor. */
       flow__autopan(f, scr);
       f->marquee_cur = scr;
-      flow_pt wa = flow_to_world(f, f->marquee_anchor), wc = flow_to_world(f, scr);
+      flow_pt wa = f->marquee_anchor_world, wc = flow_to_world(f, scr);
       flow_rect wr = { wa.x < wc.x ? wa.x : wc.x, wa.y < wc.y ? wa.y : wc.y,
                        (wa.x < wc.x ? wc.x - wa.x : wa.x - wc.x),
                        (wa.y < wc.y ? wc.y - wa.y : wa.y - wc.y) };

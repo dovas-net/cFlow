@@ -256,10 +256,14 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   }
 
   /* marquee box (after nodes, before minimap/overlay so app panels still win).
-     anchor/cur are SCREEN coords; stroke a normalized border with a distinct glyph. */
+     The anchor corner is the WORLD-pinned press point re-projected each frame
+     (inc-5 #3) so the drawn border tracks the GROWN rect after auto-pan; cur is
+     already current screen. At zoom!=1 the round-trip can land ±1 cell from the
+     raw press cell — acceptable for a 1-cell-glyph overlay. */
   if (f->marquee_on) {
-    int x0 = f->marquee_anchor.x, x1 = f->marquee_cur.x;
-    int y0 = f->marquee_anchor.y, y1 = f->marquee_cur.y;
+    flow_pt ma = flow_to_screen(f, f->marquee_anchor_world);
+    int x0 = ma.x, x1 = f->marquee_cur.x;
+    int y0 = ma.y, y1 = f->marquee_cur.y;
     if (x1 < x0) { int t = x0; x0 = x1; x1 = t; }
     if (y1 < y0) { int t = y0; y0 = y1; y1 = t; }
     for (int x = x0; x <= x1; x++) {                       /* horizontal edges */

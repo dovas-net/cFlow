@@ -261,7 +261,11 @@ struct flow {
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
   int last_click_edge;                                         /* edge dblclick pair state, mirroring last_click_node; broken by any OTHER click (node/pane/different edge) and on flow_load */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
-  int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
+  int marquee_active, marquee_on; flow_pt marquee_cur;        /* marquee: armed intent / live cursor (screen) */
+  flow_pt marquee_anchor_world;   /* press point WORLD-pinned at threshold-cross (inc-5 #3):
+                                     the rect grows from here under auto-pan instead of
+                                     chasing a screen anchor; re-projected per frame for the
+                                     render box; only read while marquee_on */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
   flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */

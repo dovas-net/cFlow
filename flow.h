@@ -432,7 +432,11 @@ struct flow {
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
   int last_click_edge;                                         /* edge dblclick pair state, mirroring last_click_node; broken by any OTHER click (node/pane/different edge) and on flow_load */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
-  int marquee_active, marquee_on; flow_pt marquee_anchor, marquee_cur; /* marquee: armed intent / live; screen coords */
+  int marquee_active, marquee_on; flow_pt marquee_cur;        /* marquee: armed intent / live cursor (screen) */
+  flow_pt marquee_anchor_world;   /* press point WORLD-pinned at threshold-cross (inc-5 #3):
+                                     the rect grows from here under auto-pan instead of
+                                     chasing a screen anchor; re-projected per frame for the
+                                     render box; only read while marquee_on */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
   flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */
@@ -2405,10 +2409,14 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   }
 
   /* marquee box (after nodes, before minimap/overlay so app panels still win).
-     anchor/cur are SCREEN coords; stroke a normalized border with a distinct glyph. */
+     The anchor corner is the WORLD-pinned press point re-projected each frame
+     (inc-5 #3) so the drawn border tracks the GROWN rect after auto-pan; cur is
+     already current screen. At zoom!=1 the round-trip can land ±1 cell from the
+     raw press cell — acceptable for a 1-cell-glyph overlay. */
   if (f->marquee_on) {
-    int x0 = f->marquee_anchor.x, x1 = f->marquee_cur.x;
-    int y0 = f->marquee_anchor.y, y1 = f->marquee_cur.y;
+    flow_pt ma = flow_to_screen(f, f->marquee_anchor_world);
+    int x0 = ma.x, x1 = f->marquee_cur.x;
+    int y0 = ma.y, y1 = f->marquee_cur.y;
     if (x1 < x0) { int t = x0; x0 = x1; x1 = t; }
     if (y1 < y0) { int t = y0; y0 = y1; y1 = t; }
     for (int x = x0; x <= x1; x++) {                       /* horizontal edges */
@@ -3020,7 +3028,9 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
       f->moved = 1;                              /* threshold crossed: begin drag, marquee, or pan */
       if (f->marquee_active) {
-        f->marquee_on = 1; f->marquee_anchor = f->down_pos;
+        f->marquee_on = 1;
+        f->marquee_anchor_world = flow_to_world(f, f->down_pos);  /* world-pin ONCE,
+          before any auto-pan — same shape as drag_grab/drag_last_world below */
       } else if (f->down_node != -1) {
         flow_node *nd = flow_get_node(f, f->down_node);
         flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
@@ -3035,12 +3045,14 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       }
     }
     if (f->marquee_on) {                          /* live marquee: replace-select within the box */
-      /* pan FIRST, then re-select at post-pan world coords (same order as node-drag):
-         the rect below is recomputed from the NEW view, so the marquee chases the
-         screen-coordinate anchor as the world scrolls and the selection tracks it. */
+      /* pan FIRST, then re-select at post-pan world coords (same order as node-drag).
+         The anchor corner is the WORLD point pinned at threshold-cross, so as auto-pan
+         scrolls the view only the cursor corner moves in world — the rect GROWS from
+         the press point (world-stable selection, inc-5 #3) instead of chasing the
+         screen anchor. */
       flow__autopan(f, scr);
       f->marquee_cur = scr;
-      flow_pt wa = flow_to_world(f, f->marquee_anchor), wc = flow_to_world(f, scr);
+      flow_pt wa = f->marquee_anchor_world, wc = flow_to_world(f, scr);
       flow_rect wr = { wa.x < wc.x ? wa.x : wc.x, wa.y < wc.y ? wa.y : wc.y,
                        (wa.x < wc.x ? wc.x - wa.x : wa.x - wc.x),
                        (wa.y < wc.y ? wc.y - wa.y : wa.y - wc.y) };
