@@ -208,6 +208,16 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     for (int k = 0; k < flow_node_count(f); k++) {
       flow_node *n = &flow_nodes(f)[order ? order[k] : k];
       if (!flow__node_visible(f, n)) continue;   /* same gate as flow_hit_node */
+      /* viewport cull (inc-5 #9): skip a node whose SCREEN FOOTPRINT misses the
+         buffer. Screen space on purpose — footprints are constant-size (only
+         position scales with zoom, src/flow_model.h flow__node_footprint), so a
+         world-rect test would under-cover the drawn area at zoom<1 and drop
+         on-screen cells. flow_rect_intersects' closed convention over-includes by
+         a cell per edge; the per-cell clamps downstream decide what draws, so the
+         cull can never drop a visible cell. RENDER-LOOP-ONLY (pinned): never
+         inside flow__node_visible, which hit/marquee/bounds/minimap share. */
+      if (!flow_rect_intersects(flow__node_footprint(f, n, lod),
+                                (flow_rect){ 0, 0, cols, rows })) continue;
       flow_rect wr = flow_node_rect_abs(f, n);
       flow_pt s = flow_to_screen(f, (flow_pt){ wr.x, wr.y });
       const flow_node_type *nt = flow_node_type_for(f, n->type);
