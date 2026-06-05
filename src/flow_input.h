@@ -292,15 +292,21 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
               flow_rect cr = flow_node_rect_abs(f, cn);
               int ex[2] = { cr.x, cr.x + cr.w }, ey[2] = { cr.y, cr.y + cr.h };
               for (int k = 0; k < 2; k++) {
+                /* store the BORDER cell: a trailing (far) edge x+w is one past
+                   the last drawn border column x+w-1, so normalize k==1 by -1
+                   at record time (inc-6 #2). Match + snap stay on the one-past
+                   values above; dedup compares normalized-to-normalized. */
                 if ((ex[k] == t.x || ex[k] == t.x + bw) && f->helper.nvert < 8) {
+                  int sv = (k == 1) ? ex[k] - 1 : ex[k];
                   int dup = 0;
-                  for (int m = 0; m < f->helper.nvert; m++) if (f->helper.vert[m] == ex[k]) dup = 1;
-                  if (!dup) f->helper.vert[f->helper.nvert++] = ex[k];
+                  for (int m = 0; m < f->helper.nvert; m++) if (f->helper.vert[m] == sv) dup = 1;
+                  if (!dup) f->helper.vert[f->helper.nvert++] = sv;
                 }
                 if ((ey[k] == t.y || ey[k] == t.y + bh) && f->helper.nhorz < 8) {
+                  int sv = (k == 1) ? ey[k] - 1 : ey[k];
                   int dup = 0;
-                  for (int m = 0; m < f->helper.nhorz; m++) if (f->helper.horz[m] == ey[k]) dup = 1;
-                  if (!dup) f->helper.horz[f->helper.nhorz++] = ey[k];
+                  for (int m = 0; m < f->helper.nhorz; m++) if (f->helper.horz[m] == sv) dup = 1;
+                  if (!dup) f->helper.horz[f->helper.nhorz++] = sv;
                 }
               }
             }

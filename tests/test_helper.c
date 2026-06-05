@@ -8,7 +8,10 @@
    Single-node drag only: when a dragged edge (L/R/T/B) comes within 1 cell of
    a VISIBLE neighbor's matching-axis edge, the drag snaps onto it and a
    full-row/column dashed guide (vert 0x254E, horz 0x254C) is recorded/drawn.
-   Guides honor flow__node_visible (view-level) and clear on release. */
+   Guides honor flow__node_visible (view-level) and clear on release.
+   Trailing (right/bottom) guides store the BORDER cell (far edge - 1, inc-6
+   #2) so both directions render flush on the box at zoom 1; leading guides
+   store the near edge verbatim. Snap math stays on the one-past far edges. */
 
 static void feed(flow_t *f, const char *s) { flow_feed(f, s, (int)strlen(s)); }
 static void press_at(flow_t *f, int sx, int sy)   { char b[32]; snprintf(b, sizeof b, "\x1b[<0;%d;%dM",  sx + 1, sy + 1); feed(f, b); }
@@ -144,7 +147,11 @@ int main(void) {
     flow_free(f); flow_free(g);
   }
 
-  /* ---- 8: mid-drag render golden with an active vertical guide ---- */
+  /* ---- 8: mid-drag render golden with an active vertical guide ----
+     (inc-6 #2 re-target: leading -> TRAILING snap so the increment's only
+     golden re-mint exercises the trailing-edge normalization. B's right edge
+     snaps to A's right edge and the guide lands ON the shared border col 13,
+     not one-past at 14. Leading coverage stays in scenes 1-6 and 11.) */
   {
     int cols = 40, rows = 12;
     flow_t *f = flow_new(cols, rows); flow_register_defaults(f);
@@ -154,15 +161,88 @@ int main(void) {
     flow_node *bn = flow_get_node(f, B); bn->w = 6; bn->h = 5;
     flow_set_helper_lines(f, 1);
     press_at(f, 32, 11);                  /* grab (2,1); B.top edge y10: clear of A's {5,8} */
-    move_to(f, 12, 11);                   /* prospective left = 10 == A.left -> guide */
+    move_to(f, 10, 11);                   /* prospective left = 8: right edge 8+6 = 14 == A far edge */
+    ASSERT_INT(flow_node_abs(f, flow_get_node(f, B)).x, 8, "golden scene: trailing snap landed");
     ASSERT_INT(f->helper.nvert, 1, "golden scene: guide active");
+    ASSERT_INT(f->helper.vert[0], 13, "  ON the shared right border col 13");
     flow_cell *buf = (flow_cell*)malloc((size_t)cols * rows * sizeof(flow_cell));
     flow_render(f, buf, cols, rows);
     char *s = cells_to_string(buf, cols, rows);
     ASSERT(strstr(s, "\xe2\x95\x8e") != NULL, "vertical guide glyph 0x254E present");
     SNAPSHOT("render_helper_snap", s);
     free(s); free(buf);
-    release_at(f, 12, 11);
+    release_at(f, 10, 11);
+    flow_free(f);
+  }
+
+  /* ---- 9: trailing X guide stores the BORDER cell, not one-past ----
+     A's right border draws at col 13 (x+w-1); flow_node_rect_abs's far edge
+     is 14 (x+w). The recorded guide must land on 13 so it overlays the box. */
+  {
+    int A, B; flow_t *f = mk(&A, &B, 40, 20);
+    flow_set_helper_lines(f, 1);
+    press_at(f, 42, 22);                  /* grab (2,2) */
+    move_to(f, 10, 22);                   /* prospective left = 8: right edge 8+6 = 14 == A far edge */
+    ASSERT_INT(flow_node_abs(f, flow_get_node(f, B)).x, 8, "trailing snap landed (snap math untouched)");
+    ASSERT_INT(f->helper.nvert, 1, "one vertical guide");
+    ASSERT_INT(f->helper.vert[0], 13, "  ON A's right border col 13, not far edge 14");
+    ASSERT_INT(f->helper.nhorz, 0, "no horizontal guide");
+    release_at(f, 10, 22);
+    flow_free(f);
+  }
+
+  /* ---- 10: trailing Y guide stores the BORDER cell, not one-past ---- */
+  {
+    int A, B; flow_t *f = mk(&A, &B, 40, 20);
+    flow_set_helper_lines(f, 1);
+    press_at(f, 42, 22);                  /* grab (2,2) */
+    move_to(f, 42, 5);                    /* prospective top = 3: bottom edge 3+5 = 8 == A far edge */
+    ASSERT_INT(flow_node_abs(f, flow_get_node(f, B)).y, 3, "trailing snap: B.bottom onto A.bottom");
+    ASSERT_INT(f->helper.nhorz, 1, "one horizontal guide");
+    ASSERT_INT(f->helper.horz[0], 7, "  ON A's bottom border row 7, not far edge 8");
+    ASSERT_INT(f->helper.nvert, 0, "no vertical guide");
+    release_at(f, 42, 5);
+    flow_free(f);
+  }
+
+  /* ---- 11: leading guide still stores the near-edge VERBATIM ----
+     The -1 normalization applies ONLY to trailing (far) edges: a box's near
+     edge IS its drawn border, so left->left stores 10 with no shift. The
+     asymmetry of the fix is intentional. */
+  {
+    int A, B; flow_t *f = mk(&A, &B, 30, 20);
+    flow_set_helper_lines(f, 1);
+    press_at(f, 32, 22);
+    move_to(f, 12, 22);                   /* prospective left = 10 == A.left */
+    ASSERT_INT(f->helper.nvert, 1, "leading guide recorded");
+    ASSERT_INT(f->helper.vert[0], 10, "  near edge verbatim: 10, no -1 applied");
+    release_at(f, 12, 22);
+    flow_free(f);
+  }
+
+  /* ---- 12: coincident leading+trailing guides merge to ONE line ----
+     C1.left = 13 == C2's right BORDER col (far edge 14, normalized 13): both
+     normalize to the same stored value, so the dedup collapses them into one
+     guide. Candidate order matters for the guard: the leading store (13) must
+     land FIRST so a compare-raw-vs-stored bug (raw 14 not in [13]) would
+     double-record. The dragged box is 1 wide so t.x == 13 (C1's leading edge)
+     and t.x+bw == 14 (C2's far edge) both match within one drag. */
+  {
+    flow_t *f = flow_new(80, 30); flow_register_defaults(f);
+    int C1 = flow_add_node(f, "default", (flow_pt){13, 15}, (void*)"C1");
+    flow_node *c1 = flow_get_node(f, C1); c1->w = 4; c1->h = 3;   /* left edge 13 */
+    int C2 = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"C2");
+    flow_node *c2 = flow_get_node(f, C2); c2->w = 4; c2->h = 3;   /* right border 13, far edge 14 */
+    int B = flow_add_node(f, "default", (flow_pt){40, 20}, (void*)"B");
+    flow_node *bn = flow_get_node(f, B); bn->w = 1; bn->h = 5;
+    flow_set_helper_lines(f, 1);
+    press_at(f, 40, 20);                  /* grab (0,0) */
+    move_to(f, 13, 20);                   /* t.x = 13: left == C1.left(13), right == C2 far edge(14) */
+    ASSERT_INT(flow_node_abs(f, flow_get_node(f, B)).x, 13, "dedup scene: landed at 13");
+    ASSERT_INT(f->helper.nvert, 1, "leading+trailing on the same border col merge to ONE guide");
+    ASSERT_INT(f->helper.vert[0], 13, "  the shared border col 13");
+    ASSERT_INT(f->helper.nhorz, 0, "no horizontal guide");
+    release_at(f, 13, 20);
     flow_free(f);
   }
 
