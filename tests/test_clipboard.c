@@ -241,5 +241,90 @@ int main(void) {
     remove(P);
   }
 
+  /* ---- 13: group container size survives paste (inc-6 #1 paste-group-remeasure) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int g = flow_add_node(f, "group", (flow_pt){10, 10}, NULL);
+    flow_node *gn = flow_get_node(f, g); gn->w = 20; gn->h = 8;   /* the flow_group post-add idiom */
+    flow_select_node(f, g, 0);
+    flow_copy_selection(f);
+    ASSERT_INT(flow_paste(f), 1, "paste mints the group");
+    int pg = node_at(f, 11, 11);
+    ASSERT(pg != -1 && pg != g, "pasted group at +1 offset");
+    ASSERT_INT(flow_get_node(f, pg)->w, 20, "pasted group keeps w");
+    ASSERT_INT(flow_get_node(f, pg)->h, 8,  "pasted group keeps h");
+    flow_free(f);
+  }
+
+  /* ---- 14: manually-resized default node survives paste ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){5, 5}, (void*)"A");
+    flow_node *an = flow_get_node(f, a); an->w = 30; an->h = 5;   /* caller resize, would re-measure 5x3 */
+    flow_select_node(f, a, 0);
+    flow_copy_selection(f);
+    ASSERT_INT(flow_paste(f), 1, "paste mints the resized node");
+    int pa = node_at(f, 6, 6);
+    ASSERT(pa != -1, "clone at +1 offset");
+    ASSERT_INT(flow_get_node(f, pa)->w, 30, "manual w survives paste");
+    ASSERT_INT(flow_get_node(f, pa)->h, 5,  "manual h survives paste");
+    flow_free(f);
+  }
+
+  /* ---- 15: content-measured node unaffected — the restore is inert ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){5, 5}, (void*)"Hello");
+    flow_select_node(f, a, 0);
+    flow_copy_selection(f);
+    ASSERT_INT(flow_paste(f), 1, "paste mints the measured node");
+    int pa = node_at(f, 6, 6);
+    ASSERT(pa != -1, "clone at +1 offset");
+    ASSERT_INT(flow_get_node(f, pa)->w, flow_get_node(f, a)->w, "restore inert for measured node");
+    ASSERT_INT(flow_get_node(f, pa)->w, 9, "  = strlen(\"Hello\")+4");
+    flow_free(f);
+  }
+
+  /* ---- 16: duplicate (d) shares the fix — same flow__paste_snaps core ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int g = flow_add_node(f, "group", (flow_pt){10, 10}, NULL);
+    flow_node *gn = flow_get_node(f, g); gn->w = 20; gn->h = 8;
+    flow_select_node(f, g, 0);
+    ASSERT_INT(flow_duplicate_selection(f), 1, "duplicate mints");
+    int d1 = node_at(f, 11, 11);
+    ASSERT(d1 != -1, "duplicate at +1 offset");
+    ASSERT_INT(flow_get_node(f, d1)->w, 20, "duplicate keeps w");
+    ASSERT_INT(flow_get_node(f, d1)->h, 8,  "duplicate keeps h");
+    flow_select_node(f, d1, 0);                  /* d built-in routes through the same core */
+    flow_feed(f, "d", 1);
+    int d2 = node_at(f, 12, 12);
+    ASSERT(d2 != -1, "d key duplicates at +1");
+    ASSERT_INT(flow_get_node(f, d2)->w, 20, "d key clone keeps w");
+    ASSERT_INT(flow_get_node(f, d2)->h, 8,  "d key clone keeps h");
+    flow_free(f);
+  }
+
+  /* ---- 17: restored size round-trips undo/redo (ADD_NODE snaps at undo time) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int g = flow_add_node(f, "group", (flow_pt){10, 10}, NULL);
+    flow_node *gn = flow_get_node(f, g); gn->w = 20; gn->h = 8;
+    flow_select_node(f, g, 0);
+    flow_copy_selection(f);
+    int j0 = f->journal.n;
+    ASSERT_INT(flow_paste(f), 1, "paste");
+    ASSERT_INT(f->journal.n, j0 + 1, "paste is one undo step");
+    flow_undo(f);
+    ASSERT_INT(flow_node_count(f), 1, "undo removes the pasted group");
+    flow_redo(f);
+    ASSERT_INT(flow_node_count(f), 2, "redo reinstates it");
+    int pg = node_at(f, 11, 11);
+    ASSERT(pg != -1, "re-pasted group relocated");
+    ASSERT_INT(flow_get_node(f, pg)->w, 20, "w survives undo/redo");
+    ASSERT_INT(flow_get_node(f, pg)->h, 8,  "h survives undo/redo");
+    flow_free(f);
+  }
+
   return flowtest_report("test_clipboard");
 }

@@ -1338,11 +1338,17 @@ static int flow__paste_snaps(flow_t *f, const flow__node_snap *ns, int nn,
   for (int i = 0; i < nn; i++) {
     flow_pt at = { ns[i].node.pos.x + off, ns[i].node.pos.y + off };
     newid[i] = flow_add_node(f, ns[i].node.type, at, ns[i].node.data);
-    flow_node *pn = flow_get_node(f, newid[i]);              /* re-measured by add; manual w/h
-                                                                resizes do NOT survive (the
-                                                                flow_load convention) */
-    if (pn) pn->flags |= (ns[i].node.flags & FLOW_EXTENT_PARENT);  /* behavior flag carries;
+    flow_node *pn = flow_get_node(f, newid[i]);              /* re-fetch: add may realloc */
+    if (pn) {
+      pn->w = ns[i].node.w; pn->h = ns[i].node.h;            /* restore the snap's size over the
+                                                                re-measure (group containers and
+                                                                manual resizes survive paste; the
+                                                                flow_group post-add idiom). The
+                                                                ADD_NODE snap captures it at undo
+                                                                time, so undo/redo round-trips. */
+      pn->flags |= (ns[i].node.flags & FLOW_EXTENT_PARENT);  /* behavior flag carries;
                                                                 transient flags do not */
+    }
   }
   for (int i = 0; i < nn; i++) {                             /* reparent inside the pasted set */
     int op = ns[i].node.parent;
