@@ -159,9 +159,16 @@ static void key_palette(flow_t *f, void *u) {
   (void)f; (void)u;
   fc_pal.open = 1; fc_pal.qn = 0; fc_pal.q[0] = 0;
 }
+/* helper-lines toggle (inc-5 #8 integration): 'a' flips alignment guides + snap */
+static int fc_align_on = 0;
+static void key_align(flow_t *f, void *u) {
+  (void)u;
+  fc_align_on = !fc_align_on;
+  flow_set_helper_lines(f, fc_align_on);
+}
 static void fc_overlay(flow_t *f, flow_surface *s, void *u) {
   (void)u;
-  flow_text(s, 1, 0, "flowchart  l:layout  g:group  G:ungroup  h:hide sel  H:show all  /:find  q:quit",
+  flow_text(s, 1, 0, "flowchart l:layout g:group G:ungroup h:hide H:show a:align /:find q:quit",
             FLOW_FG, FLOW_BG, FLOW_BOLD);
   if (fc_event[0]) flow_text(s, 1, 1, fc_event, FLOW_FG, FLOW_BG, FLOW_DIM);
   if (fc_pal.open) {
@@ -202,6 +209,7 @@ static int flowchart_setup(flow_t *f) {
   flow_bind_key(f, "H", key_show_all, NULL);
   flow_bind_key(f, "/", key_palette,  NULL);    /* command palette (inc-5 #10): the hook
                                                    below consumes input only WHILE open */
+  flow_bind_key(f, "a", key_align,    NULL);    /* helper-lines toggle (inc-5 #8) */
   flow_set_key_hook(f, fc_pal_hook, NULL);
   flow_callbacks cb = {0};
   cb.on_overlay = fc_overlay;

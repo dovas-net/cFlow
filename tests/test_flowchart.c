@@ -185,6 +185,15 @@ int main(void) {
     flow_set_node_hidden(f, by_label(f, "save"), 0);
   }
 
+  /* ---- inc-5 #8 integration: 'a' toggles alignment helper lines ---- */
+  {
+    ASSERT_INT(f->helper_on, 0, "helper lines start OFF");
+    flow_feed(f, "a", 1);
+    ASSERT_INT(f->helper_on, 1, "'a' turns helper lines on");
+    flow_feed(f, "a", 1);
+    ASSERT_INT(f->helper_on, 0, "'a' again turns them off");
+  }
+
   flow_free(f);
   return flowtest_report("test_flowchart");
 }
