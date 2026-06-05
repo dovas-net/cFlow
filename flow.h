@@ -291,6 +291,24 @@ int  flow_selected_edge(flow_t *f);   /* first selected edge id, or -1 */
 void flow_select_edge(flow_t *f, int id, int additive);  /* set FLOW_SELECTED on the edge; !additive clears node + other edge selection first (mutual exclusivity) */
 int  flow_selected_count(flow_t *f);  /* number of FLOW_SELECTED nodes */
 int  flow_selected_nodes(flow_t *f, int *out, int max);  /* fill out[] with selected ids in insertion order; returns total count (may exceed max) */
+
+/* In-process selection clipboard (inc-5 #7). Copy/cut deep-snapshot the selected
+   nodes plus the intra-selection edges (BOTH endpoints selected; edge SELECTION
+   flags are irrelevant); node->data is ALIASED (borrowed — the undo-snapshot
+   contract), edge labels are dup'd. Paste re-mints through flow_add_node/
+   flow_add_edge with FRESH ids at a cumulative offset (+gen+1 per paste, gen reset
+   on copy/cut) as ONE undo step, reparents pasted children whose original parent
+   was also pasted (others land as roots at absolute coords), restores edge type +
+   label, and selects the result with ONE sig-gated on_selection_change. Pasted
+   nodes are re-MEASURED (manual w/h resizes do not survive — the flow_load
+   convention); pasted edges stay validator-GATED (deliberate asymmetry vs
+   flow_load's suspension: a paste violating a LIVE validator drops those edges —
+   partial paste). The clipboard survives graph mutations and flow_load; freed
+   only in flow_free. Keys: y copy, c cut, p paste, d duplicate. */
+void flow_copy_selection(flow_t *f);       /* snapshot selection into the clipboard (no graph change, no callbacks) */
+void flow_cut_selection(flow_t *f);        /* = copy_selection then flow_delete_selection */
+int  flow_paste(flow_t *f);                /* mint clipboard contents at a growing offset; returns nodes pasted (0 if clipboard empty) */
+int  flow_duplicate_selection(flow_t *f);  /* snapshot+paste in one shot at +1,+1; clipboard left UNTOUCHED; returns nodes added */
 int  flow_select_in_rect(flow_t *f, flow_rect world, flow_select_mode mode, int additive);  /* select nodes contained (FULL) or intersecting (PARTIAL) the world rect; !additive clears first; returns count selected */
 void flow_set_marquee_mode(flow_t *f, flow_select_mode mode);  /* default mode for shift-drag marquee (defaults to FLOW_SELECT_PARTIAL) */
 
@@ -464,6 +482,16 @@ struct flow {
   struct { flow_bg_variant variant; int gap; } bg;
   struct { char seq[8]; flow_key_fn fn; void *user; } keys[32]; int nkeys;  /* key-binding registry */
   int statusbar;  /* built-in bottom help/status line */
+  struct {                                  /* selection clipboard (inc-5 #7): deep snapshots.
+                                               node snaps store ABS pos in .node.pos (resolved at
+                                               copy time — the source graph may be gone at paste);
+                                               edge snaps own their label_copy. Survives
+                                               flow__graph_reset/flow_load BY OMISSION (not graph
+                                               state); freed only in flow_free. calloc-empty. */
+    flow__node_snap *nodes; int nn;
+    flow__edge_snap *edges; int ne;
+    int gen;                                /* cumulative paste-offset counter; reset on copy/cut */
+  } clip;
   struct {
     struct flow__cmd *items; int n, cap;    /* undo stack (top = items[n-1]) */
     struct flow__cmd *redo;  int rn, rcap;  /* redo stack */
@@ -647,9 +675,20 @@ flow_t *flow_new(int cols, int rows) {
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
+/* free the clipboard's owned memory: each edge snap's label_copy + the arrays.
+   NEVER frees node data (borrowed, the undo-snapshot contract). Called from
+   flow_free and from copy (replace-on-copy); deliberately NOT from
+   flow__graph_reset — the clipboard is not graph state and survives flow_load. */
+static void flow__clipboard_clear(flow_t *f) {
+  for (int i = 0; i < f->clip.ne; i++) free(f->clip.edges[i].label_copy);
+  free(f->clip.nodes); free(f->clip.edges);
+  f->clip.nodes = NULL; f->clip.edges = NULL;
+  f->clip.nn = f->clip.ne = 0; f->clip.gen = 0;
+}
 void flow_free(flow_t *f) {
   if (!f) return;
   flow__journal_clear(f);   /* frees command label copies + stacks; drops (never frees) node->data */
+  flow__clipboard_clear(f); /* clipboard label copies + arrays (inc-5 #7) */
   for (int i = 0; i < f->nedges; i++) free(f->edges[i].label);
   free(f->nodes); free(f->edges); free(f->ntypes); free(f->etypes); free(f->front); free(f);
 }
@@ -1216,6 +1255,117 @@ int flow_add_node_center(flow_t *f, const char *type, void *data) {
   flow__undo_end(f);
   return id;
 }
+/* ---- selection clipboard (inc-5 #7) ---- */
+static int flow__clip_endpoint_selected(flow_t *f, int id) {
+  flow_node *n = flow_get_node(f, id);
+  return n && (n->flags & FLOW_SELECTED);
+}
+/* snapshot the CURRENT selection into caller-owned arrays. Node snaps store the
+   ABSOLUTE position in .node.pos (resolved NOW — the source graph may be gone at
+   paste time) and keep .node.parent for the paste-time reparent map. Edge snaps
+   are taken iff BOTH endpoints are selected; label dup'd into label_copy with
+   .edge.label aliased to it (the flow__edge_snap convention). */
+static void flow__snap_selection(flow_t *f, flow__node_snap **on, int *onn,
+                                 flow__edge_snap **oe, int *one) {
+  int nn = 0, ne = 0;
+  for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_SELECTED) nn++;
+  for (int i = 0; i < f->nedges; i++)
+    if (flow__clip_endpoint_selected(f, f->edges[i].source) &&
+        flow__clip_endpoint_selected(f, f->edges[i].target)) ne++;
+  flow__node_snap *ns = nn ? (flow__node_snap*)malloc((size_t)nn * sizeof *ns) : NULL;
+  flow__edge_snap *es = ne ? (flow__edge_snap*)malloc((size_t)ne * sizeof *es) : NULL;
+  int k = 0;
+  for (int i = 0; i < f->nnodes; i++) {
+    if (!(f->nodes[i].flags & FLOW_SELECTED)) continue;
+    ns[k].id = f->nodes[i].id; ns[k].index = i;
+    ns[k].node = f->nodes[i];                                /* data BORROWED */
+    ns[k].node.pos = flow_node_abs(f, &f->nodes[i]);         /* ABS at copy time */
+    k++;
+  }
+  k = 0;
+  for (int i = 0; i < f->nedges; i++) {
+    flow_edge *e = &f->edges[i];
+    if (!flow__clip_endpoint_selected(f, e->source) ||
+        !flow__clip_endpoint_selected(f, e->target)) continue;
+    es[k].id = e->id; es[k].index = i;
+    es[k].edge = *e;
+    es[k].label_copy = flow__dup(e->label);                  /* label OWNED: dup it */
+    es[k].edge.label = es[k].label_copy;
+    k++;
+  }
+  *on = ns; *onn = nn; *oe = es; *one = ne;
+}
+/* paste core: re-mint snaps through the PUBLIC add path — never the id-preserving
+   flow__insert_node_at (ids must be fresh). Three passes: mint nodes at abs+off,
+   reparent children whose original parent is in the paste map, mint edges (type +
+   dup'd label restored; validator gates apply — partial paste on reject). Whole
+   sequence = ONE undo step, ONE sig-gated selection event (the pasted set). */
+static int flow__paste_snaps(flow_t *f, const flow__node_snap *ns, int nn,
+                             const flow__edge_snap *es, int ne, int off) {
+  if (nn == 0) return 0;
+  unsigned long sig = flow__sel_sig(f);
+  int *newid = (int*)malloc((size_t)nn * sizeof(int));
+  flow__undo_begin(f);
+  f->cb_suppress++;                                          /* one notify at the end */
+  for (int i = 0; i < nn; i++) {
+    flow_pt at = { ns[i].node.pos.x + off, ns[i].node.pos.y + off };
+    newid[i] = flow_add_node(f, ns[i].node.type, at, ns[i].node.data);
+    flow_node *pn = flow_get_node(f, newid[i]);              /* re-measured by add; manual w/h
+                                                                resizes do NOT survive (the
+                                                                flow_load convention) */
+    if (pn) pn->flags |= (ns[i].node.flags & FLOW_EXTENT_PARENT);  /* behavior flag carries;
+                                                                transient flags do not */
+  }
+  for (int i = 0; i < nn; i++) {                             /* reparent inside the pasted set */
+    int op = ns[i].node.parent;
+    if (op == -1) continue;
+    for (int j = 0; j < nn; j++)
+      if (ns[j].id == op) { flow_set_parent(f, newid[i], newid[j]); break; }
+    /* original parent not pasted: stays root at abs+off (dangling-parent rule) */
+  }
+  for (int i = 0; i < ne; i++) {
+    int s = -1, t = -1;
+    for (int j = 0; j < nn; j++) {
+      if (ns[j].id == es[i].edge.source) s = newid[j];
+      if (ns[j].id == es[i].edge.target) t = newid[j];
+    }
+    int eid = flow_add_edge(f, s, t, es[i].edge.source_handle, es[i].edge.target_handle);
+    if (eid == -1) continue;                                 /* validator/dup reject: partial paste */
+    flow_edge *pe = flow_get_edge(f, eid);
+    if (pe) snprintf(pe->type, sizeof pe->type, "%s", es[i].edge.type);  /* router type, like flow_load */
+    if (es[i].label_copy) flow_set_edge_label(f, eid, es[i].label_copy); /* SET_LABEL coalesces into the txn */
+  }
+  flow_clear_selection(f);                                   /* pasted set becomes the selection */
+  for (int i = 0; i < nn; i++) flow_select_node(f, newid[i], 1);
+  f->cb_suppress--;
+  flow__undo_end(f);
+  flow__notify_selection(f, sig);                            /* node-only sig changed: fires once */
+  free(newid);
+  return nn;
+}
+void flow_copy_selection(flow_t *f) {
+  flow__clipboard_clear(f);                                  /* replace-on-copy; resets gen */
+  flow__snap_selection(f, &f->clip.nodes, &f->clip.nn, &f->clip.edges, &f->clip.ne);
+}
+void flow_cut_selection(flow_t *f) {
+  flow_copy_selection(f);
+  flow_delete_selection(f);                                  /* fires on_nodes_delete once; ONE undo step */
+}
+int flow_paste(flow_t *f) {
+  if (f->clip.nn == 0) return 0;
+  int n = flow__paste_snaps(f, f->clip.nodes, f->clip.nn, f->clip.edges, f->clip.ne,
+                            f->clip.gen + 1);
+  f->clip.gen++;                                             /* consecutive pastes cascade */
+  return n;
+}
+int flow_duplicate_selection(flow_t *f) {
+  flow__node_snap *ns; flow__edge_snap *es; int nn, ne;
+  flow__snap_selection(f, &ns, &nn, &es, &ne);               /* LOCAL temp: f->clip untouched */
+  int r = flow__paste_snaps(f, ns, nn, es, ne, 1);
+  for (int i = 0; i < ne; i++) free(es[i].label_copy);
+  free(ns); free(es);
+  return r;
+}
 /* getViewportForBounds: pick a zoom that makes rect b fit inside the usable area
    (cols/rows minus `margin` cells of padding on each side), clamped to the
    [zmin,zmax] range, then pan so the rect centre lands on the screen centre.
@@ -1320,6 +1470,10 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (seq[0] == 'u') { flow_undo(f); return 1; }                    /* declared above, defined in flow_undo.h (same TU) */
   if (seq[0] == '\x12') { flow_redo(f); return 1; }                 /* Ctrl-r: single byte, longest-match safe */
   if (seq[0] == '\t') { flow_focus_next(f); return 1; }             /* Tab: focus traversal (inc-5 #5); Shift-Tab is CSI \x1b[Z, handled in flow_feed */
+  if (seq[0] == 'y') { flow_copy_selection(f); return 1; }          /* clipboard (inc-5 #7): y copy */
+  if (seq[0] == 'c') { flow_cut_selection(f); return 1; }           /*   c cut  */
+  if (seq[0] == 'p') { flow_paste(f); return 1; }                   /*   p paste */
+  if (seq[0] == 'd') { flow_duplicate_selection(f); return 1; }     /*   d duplicate */
   if (seq[0] == '\r') {                                             /* Enter: select the focused node (REPLACE — focus is a single cursor) */
     if (f->focus_node != -1) flow_select_node(f, f->focus_node, 0);
     return 1;                                                       /* consumed even with no focus (no-op) */
