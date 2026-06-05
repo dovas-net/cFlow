@@ -3302,16 +3302,24 @@ int flow_parse_mouse(const char *s, int n, flow_mouse_event *ev) {
 }
 /* resolve an in-flight connection at a screen cell: complete on a target handle/node
    (handle id when one is hit, else the node's default), else cancel. Shared by the
-   connectOnClick press path and the drag-complete release path. */
-static void flow__resolve_connection_at(flow_t *f, flow_pt scr) {
+   connectOnClick press path and the drag-complete release path (which ignores the
+   return). Returns 1 when the gesture COMPLETED on a target node distinct from the
+   source — even if the validator/duplicate gate rejected the add, the gesture
+   LANDED on a node, so the press is consumed (xyflow swallows the pointer event on
+   a connect) — and 0 on a cancel (empty pane / edge cell / the source), where the
+   press-path caller falls through to normal classification (inc-5 #11): the
+   cancel's on_connect_end fires here, synchronously, BEFORE whatever element event
+   the fall-through press later produces. */
+static int flow__resolve_connection_at(flow_t *f, flow_pt scr) {
   int tnode = -1; int hidx = flow_hit_handle(f, scr, &tnode);
   if (tnode == -1) tnode = flow_hit_node(f, scr);
   if (tnode != -1 && tnode != f->conn_node) {
     const flow_handle *th = (hidx >= 0) ? flow_node_handle_at(f, tnode, hidx) : NULL;
     flow_end_connection(f, tnode, th ? th->id : NULL);
-  } else {
-    flow_cancel_connection(f);             /* dropped on empty pane or the source */
+    return 1;
   }
+  flow_cancel_connection(f);               /* dropped on empty pane, an edge, or the source */
+  return 0;
 }
 /* event-driven auto-pan (spec §8, model A): ONE autopan_speed step per motion event
    while an OBJECT drag (node / connection / reconnect / marquee) has the cursor
@@ -3346,8 +3354,10 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
   }
   flow_pt scr = { ev->x, ev->y };
   if (ev->type == FLOW_MOUSE_PRESS) {
-    if (ev->button == 2) {                       /* right-click: cancel any in-flight connection, else context */
-      if (f->conn_active) { flow_cancel_connection(f); return; }
+    if (ev->button == 2) {                       /* right-click: cancel any in-flight connection, then context */
+      if (f->conn_active) flow_cancel_connection(f);  /* fires on_connect_end; the press FALLS
+        THROUGH to the context dispatch below (inc-5 #11 — a right-click is never a
+        completion, so the one rule says it always falls through) */
       int id = flow_hit_node(f, scr);
       if (id != -1) {                            /* node occludes: an edge under the same cell never fires */
         if (f->cb.on_node_context) f->cb.on_node_context(f, id, scr, f->cb.user);
@@ -3359,8 +3369,16 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     }
     if (ev->button == 0) {                       /* arm a press; classify on move/release */
       /* connectOnClick resolve: a press while already connecting (armed by a prior
-         click) completes on a target handle/node, else cancels. Never arms drag. */
-      if (f->conn_active) { flow__resolve_connection_at(f, scr); return; }
+         click) completes on a target handle/node — CONSUMED — or cancels, in which
+         case the press FALLS THROUGH to normal classification below (inc-5 #11):
+         on_connect_end has already fired synchronously inside the cancel, so the
+         element event the release later produces (edge/pane/node click, or even a
+         fresh on_connect_start from another node's source handle) comes AFTER it.
+         conn_active is cleared by end/cancel before the fall-through arms anything,
+         so re-entry into this resolve is impossible. */
+      if (f->conn_active) {
+        if (flow__resolve_connection_at(f, scr)) return;   /* completed on a node: consumed */
+      }
       if (f->space_held) {                       /* space-pan: force drag-to-pan, over a node OR the pane */
         f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
         f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;

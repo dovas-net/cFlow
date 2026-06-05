@@ -13,7 +13,11 @@ static int start_fires = 0, start_src = -2, start_seq = 0;
 static char start_handle[16];
 static int end_fires = 0, end_eid = -2, end_src = -2, end_tgt = -2, end_seq = 0, end_txn_depth = -1;
 static int conn_seq = 0;
-static int eclick_fires = 0;
+static int eclick_fires = 0, eclick_seq = 0;
+static int nclick_fires = 0;
+static int ectx_fires = 0, ectx_seq = 0;
+static void on_nclick(flow_t *f, int node, void *u) { (void)f;(void)node;(void)u; nclick_fires++; }
+static void on_ectx(flow_t *f, int edge, flow_pt s, void *u) { (void)f;(void)edge;(void)s;(void)u; ectx_fires++; ectx_seq = ++ev_seq; }
 static void on_conn(flow_t *f, int s, int t, void *u) { (void)f;(void)u; conn_src = s; conn_dst = t; conn_fires++; conn_seq = ++ev_seq; }
 static void on_cstart(flow_t *f, int src, const char *handle, void *u) {
   (void)f;(void)u; start_fires++; start_src = src; start_seq = ++ev_seq;
@@ -23,11 +27,12 @@ static void on_cend(flow_t *f, int eid, int src, int tgt, void *u) {
   (void)u; end_fires++; end_eid = eid; end_src = src; end_tgt = tgt; end_seq = ++ev_seq;
   end_txn_depth = f->journal.txn_depth;          /* 0 = fired AFTER the undo txn settled */
 }
-static void on_eclick(flow_t *f, int edge, void *u) { (void)f;(void)edge;(void)u; eclick_fires++; }
+static void on_eclick(flow_t *f, int edge, void *u) { (void)f;(void)edge;(void)u; eclick_fires++; eclick_seq = ++ev_seq; }
 static void lc_reset(void) {
   ev_seq = 0; start_fires = 0; start_src = -2; start_seq = 0; start_handle[0] = 0;
   end_fires = 0; end_eid = -2; end_src = -2; end_tgt = -2; end_seq = 0; end_txn_depth = -1;
-  conn_fires = 0; conn_src = conn_dst = -2; conn_seq = 0; eclick_fires = 0;
+  conn_fires = 0; conn_src = conn_dst = -2; conn_seq = 0;
+  eclick_fires = 0; eclick_seq = 0; nclick_fires = 0; ectx_fires = 0; ectx_seq = 0;
 }
 
 int main(void) {
@@ -158,7 +163,10 @@ int main(void) {
     flow_free(f);
   }
 
-  /* ---- connectOnClick: click empty pane mid-connection cancels ---- */
+  /* ---- connectOnClick: click empty pane mid-connection cancels AND, as of
+          inc-5 #11 (cancel fall-through), the same click reports the pane —
+          on_connect_end fires inside the cancel, then on_pane_click on release.
+          (Inverted from the inc-4 contract, which consumed the press.) ---- */
   {
     pane_clicks = 0;
     flow_t *f = flow_new(80, 24); flow_register_defaults(f);
@@ -171,7 +179,7 @@ int main(void) {
     flow_feed(f, "\x1b[<0;60;20M", 11); flow_feed(f, "\x1b[<0;60;20m", 11);
     ASSERT_INT(flow_connecting(f), 0, "empty-pane click cancels connection");
     ASSERT_INT(flow_edge_count(f), 0, "no edge created on cancel");
-    ASSERT_INT(pane_clicks, 0, "cancel-on-empty fires no on_pane_click");
+    ASSERT_INT(pane_clicks, 1, "the cancelling click ALSO reports the pane (inc-5 #11 fall-through)");
     flow_free(f);
   }
 
@@ -373,10 +381,13 @@ int main(void) {
     flow_free(f);
   }
 
-  /* ---- CROSS-EVENT PIN (#6 deferral): pressing an edge mid-cell while a connection
-          is in flight resolves the gesture (end fires) and CONSUMES the press — the
-          edge click does NOT fire. (#6's conflicts note sketched both events firing;
-          that needs flow_input.h changes outside this package's scope.) ---- */
+  /* ---- CROSS-EVENT FALL-THROUGH (inc-5 #11, the #6-deferral contract REVERSED):
+          a mid-flight press that CANCELS the connection (edge cell / empty pane /
+          source) falls through to normal press classification — on_connect_end
+          fires FIRST, then the element under the cursor gets its own event. A
+          press that COMPLETES on a target node stays consumed (xyflow swallows
+          the pointer event on a successful connect). One rule: consume iff the
+          resolution completed on a node distinct from the source. ---- */
   {
     lc_reset();
     flow_t *f = flow_new(80, 24); flow_register_defaults(f);
@@ -385,23 +396,65 @@ int main(void) {
     int d = flow_add_node(f, "default", (flow_pt){30, 15}, (void*)"D");
     int e2 = flow_add_edge(f, c, d, "out", "in");
     flow_callbacks cb = {0};
-    cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend; cb.on_edge_click = on_eclick;
+    cb.on_connect_start = on_cstart; cb.on_connect_end = on_cend;
+    cb.on_edge_click = on_eclick; cb.on_node_click = on_nclick;
+    cb.on_pane_click = on_pane; cb.on_edge_context = on_ectx;
     flow_set_callbacks(f, cb);
     flow_pt s2, t2;
     flow_edge_endpoint_screen(f, flow_get_edge(f, e2), 0, &s2);
     flow_edge_endpoint_screen(f, flow_get_edge(f, e2), 1, &t2);
     flow_pt mid = { (s2.x + t2.x) / 2, (s2.y + t2.y) / 2 };
     ASSERT_INT(flow_hit_edge(f, mid, 0), e2, "precondition: mid cell sits on the edge path");
+    char seq[32]; int n;
+
+    /* (1) edge-cancel falls through: end fires, THEN the edge click */
     flow_set_hover(f, a);
     flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out -> in flight */
     ASSERT_INT(start_fires, 1, "in-flight precondition: start fired");
-    char seq[32]; int n = snprintf(seq, sizeof seq, "\x1b[<0;%d;%dM", mid.x + 1, mid.y + 1);
+    n = snprintf(seq, sizeof seq, "\x1b[<0;%d;%dM", mid.x + 1, mid.y + 1);
     flow_feed(f, seq, n);                               /* press the edge mid-cell */
     ASSERT_INT(end_fires, 1, "press on edge mid-flight: gesture resolves (end fires)");
     ASSERT_INT(end_eid, -1, "  resolved as cancel (no node under the cell)");
     n = snprintf(seq, sizeof seq, "\x1b[<0;%d;%dm", mid.x + 1, mid.y + 1);
     flow_feed(f, seq, n);                               /* release */
-    ASSERT_INT(eclick_fires, 0, "  edge click does NOT fire (press consumed by the gesture)");
+    ASSERT_INT(eclick_fires, 1, "edge click NOW fires (cancel falls through — inverted pin)");
+    ASSERT(end_seq < eclick_seq, "  ordering: on_connect_end BEFORE on_edge_click");
+
+    /* (2) COMPLETION on a node stays consumed: no node-click from the same press */
+    lc_reset();
+    int ec0 = flow_edge_count(f);
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* press A:out -> in flight */
+    flow_feed(f, "\x1b[<0;33;17M", 11);                 /* press D's body @ (32,16): completes */
+    ASSERT_INT(end_fires, 1, "completion press: end fires");
+    ASSERT(end_eid != -1, "  with the new edge id (success)");
+    ASSERT_INT(flow_edge_count(f), ec0 + 1, "  edge added");
+    flow_feed(f, "\x1b[<0;33;17m", 11);                 /* release on D */
+    ASSERT_INT(nclick_fires, 0, "  the completing press is CONSUMED: no node-click on D");
+
+    /* (3) pane-cancel falls through to the FULL pane-click path — the event AND
+       its side effects (the release branch clears the selection before firing) */
+    lc_reset(); pane_clicks = 0;
+    flow_select_node(f, c, 0);                          /* pre-selected node to observe the clear */
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* in flight again */
+    flow_feed(f, "\x1b[<0;61;4M", 10);                  /* press empty pane @ (60,3): cancel */
+    ASSERT_INT(end_fires, 1, "pane press mid-flight: cancel fires end");
+    ASSERT_INT(end_eid, -1, "  as a cancel");
+    flow_feed(f, "\x1b[<0;61;4m", 10);                  /* release */
+    ASSERT_INT(pane_clicks, 1, "  and the pane click NOW fires (fall-through)");
+    ASSERT_INT(flow_selected_count(f), 0, "  with the full click path's side effects: selection cleared");
+
+    /* (4) right-click mid-flight: cancel fires end, THEN on_edge_context */
+    lc_reset();
+    flow_set_hover(f, a);
+    flow_feed(f, "\x1b[<0;15;7M", 10);                  /* in flight */
+    n = snprintf(seq, sizeof seq, "\x1b[<2;%d;%dM", mid.x + 1, mid.y + 1);
+    flow_feed(f, seq, n);                               /* right-press the edge mid-cell */
+    ASSERT_INT(end_fires, 1, "right-click mid-flight: cancel fires end");
+    ASSERT_INT(ectx_fires, 1, "  and on_edge_context fires for the same press");
+    ASSERT(end_seq < ectx_seq, "  ordering: end BEFORE context");
+    (void)a; (void)c; (void)d;
     flow_free(f);
   }
 
