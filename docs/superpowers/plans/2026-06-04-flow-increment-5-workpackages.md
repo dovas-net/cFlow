@@ -366,7 +366,9 @@ ZOOM-SAFE BY CONSTRUCTION. Both projections go through `flow_project` / `flow_un
 **Conflicts with.**
   - `viewport-culling` — both touch src/flow_render.h's render loop; this package edits only the marquee-box block (`src/flow_render.h:256-258`), culling edits the node/edge draw loops, so the edits are disjoint but land in the same file: rebase-coordinate, keep the marquee-box edit isolated.
   - `keyboard-move` / `tab-focus` / `copy-paste` / `node-search` — any package editing src/flow_input.h's key paths or the `struct flow` zero-init field block shares those files with this package's new `marquee_anchor_world` field (`src/flow_model.h:263`) and the motion-branch edit (`src/flow_input.h:175,189-199`). The field append is at the marquee block (not the key-registry block at `src/flow_model.h:271`) and the input edit is in `flow_handle_mouse` (not `flow_dispatch_key` / `flow_feed`), so conflicts are textual-only; resolve by landing the field append independently of any key-path edit.
-  - No gate, callback, flag, viewport-write (`flow__view_set`), or query seam is touched, so no conflict with `minimap-visible-bounds`, `validator-load-suspend`, `view-frame`, `helper-lines`, or `edge-events-inflight`.
+  - `helper-lines` — STRONGEST mutual overlap *(post-execution correction; an earlier draft disclaimed it)*: #8 appends its `helper_on`/guide fields at the SAME `struct flow` marquee zero-init block this package's `marquee_anchor_world` lands in, AND both edit `flow_input.h` motion branches (this package the marquee branch, #8 the single-node drag branch). Land sequentially; the later rebases the field order.
+  - `edge-events-inflight` — same-file `flow_input.h` line-shift risk *(post-execution correction)*: #11 edits the press branch and `flow__resolve_connection_at` while this package edits the motion branch; disjoint hunks, trivial rebase.
+  - No gate, callback, flag, viewport-write (`flow__view_set`), or query seam is touched, so no conflict with `minimap-visible-bounds`, `validator-load-suspend`, or `view-frame`.
 
 **Carry-overs fixed.**
   - Resolves inc-4 deferral #1 ("marquee world-stability"): the inc-4 §2 design notes and acceptance (`docs/superpowers/plans/2026-06-04-flow-increment-4-workpackages.md:168,182`) claimed the screen-pinned anchor kept the selection world-stable; that claim was false (caught in inc-4 review, recorded as a deliberate deferral in the inc-5 handoff). This package makes the claim true by world-pinning the anchor, and corrects the now-false in-code comment at `src/flow_input.h:190-192`.
@@ -377,7 +379,7 @@ ZOOM-SAFE BY CONSTRUCTION. Both projections go through `flow_project` / `flow_un
 
 **Goal.** Add the three framing primitives the rest of increment-5 builds on: `flow_bounds_of(f, ids, n)` (bounds of an explicit node subset), `flow_fit_bounds(f, r, margin)` (the standalone rect-arg fit, factored out of `flow_fit_view`), and `flow_set_center(f, wx, wy, zoom)` (pan a world point to the screen centre, optionally re-zooming). All three are pure framing — no model mutation, no journaling — and every viewport write routes through the `flow__view_set` seam (`src/flow_model.h:538`).
 
-**User value.** Today the only framing entry point is `flow_fit_view(f, margin)` (`src/flow_model.h:1000`), which can only frame the whole graph. Apps that want to focus a selection, jump to a search hit, or pan to a known coordinate have to reach into `f->view` and re-derive the clamp/center math by hand. These primitives expose the same getViewportForBounds math `flow_fit_view` already uses, but parameterized by a caller-chosen subset, rect, or center — the foundation `minimap-visible-bounds` (its drag-to-center) and `node-search` (frame the match) consume directly.
+**User value.** Today the only framing entry point is `flow_fit_view(f, margin)` (`src/flow_model.h:1000`), which can only frame the whole graph. Apps that want to focus a selection, jump to a search hit, or pan to a known coordinate have to reach into `f->view` and re-derive the clamp/center math by hand. These primitives expose the same getViewportForBounds math `flow_fit_view` already uses, but parameterized by a caller-chosen subset, rect, or center — the foundation `tab-focus` (frame-on-focus) and `node-search` (frame the match) consume directly. *(Post-execution correction: an earlier draft named `minimap-visible-bounds` "drag-to-center" here — a phantom; #1 is a 2-line guard fix that lands first and calls none of this API.)*
 
 **Files touched.**
   - src/flow_model.h
@@ -449,7 +451,7 @@ Not journaled, no flag, no callbacks field, no statusbar hint. Framing is viewpo
 **Depends on.** Nothing — view-frame is the foundation primitive. It uses only already-landed seams (`flow__view_set`, `flow_bounds`, `flow_node_rect_abs`, `flow_rect_union`, the `flow_set_zoom` clamp pattern).
 
 **Conflicts with.**
-  - `minimap-visible-bounds` and `viewport-culling` — DOWNSTREAM consumers (they call `flow_set_center` / `flow_fit_bounds` / `flow_bounds_of`); land view-frame first. Not a file conflict, an ordering dependency.
+  - `tab-focus` and `node-search` — the REAL downstream consumers *(post-execution correction: an earlier draft named #1/#9 here — phantoms; #1 calls none of this API and #9 only READS the view)*: #5's frame-on-focus calls `flow_set_center`, #10's Enter framing calls `flow_bounds_of`/`flow_set_center`. Land view-frame first — an ordering dependency, not a file conflict.
   - `marquee-world-anchor` and `helper-lines` — if either edits the flow_model.h viewport-projection / fit-bounds region or the flow_view.h mutator block, rebase against this package's `flow__fit_rect` extraction and the new `flow_set_center` in view.h. Mutual note: whichever lands second re-applies against the refactored `flow_fit_view` body.
   - `node-search` — binds `/` and frames its match via `flow_set_center`/`flow_fit_bounds`; coordinate so its demo-side framing call matches this signature.
   - LAYERING strain (flagged per the pinned preamble): `flow_bounds_of` leans on the cross-cutting rule's "queries are MODEL-level, hidden included" clause OVER its "bounds = VIEW-level" clause — it is the explicit-id bounds query that intentionally does NOT skip `FLOW_HIDDEN`. Resolved in Design notes (the implicit `flow_bounds()` stays view-level; `flow_bounds_of` is model-level like `flow_query.h`); test #8 is the load-bearing assert that pins the decision. Surfaced here so no later package re-litigates the divergence as a bug.
@@ -878,7 +880,8 @@ RENDER LAYER (decided). The overlay draws after the marquee box (`src/flow_rende
   - **minimap-visible-bounds** — this package now culls in SCREEN space via `flow__node_footprint` and builds NO world viewport, so the earlier "both mirror the `src/flow_render.h:49-51` world-VP idiom" conflict largely dissolves. The only remaining mutual note: do not let either edit silently change the minimap's scaling window `W` (`src/flow_render.h:52`), which is golden-locked.
   - **view-frame** — adds new framing functions that write the viewport through `flow__view_set`; this package only READS `f->view` (indirectly, via `flow__node_footprint` → `flow_to_screen`) inside the render loop and writes nothing, so there is no viewport-seam conflict, but both touch viewport-derived geometry and should land in dependency order if view-frame changes projection.
   - **marquee-world-anchor** — shares the `flow__node_visible` / footprint choke points conceptually; no code conflict because marquee stays in the model/view layers and this cull stays render-loop-local. Note recorded so a reviewer confirms neither moved a viewport test into the shared choke point.
-  - No conflict with tab-focus / keyboard-move / copy-paste / node-search / edge-events-inflight / validator-load-suspend / helper-lines: those touch the dispatch/feed key paths, struct flow's zero-init block, or flow_input.h; this package touches only the `flow_render` node loop in src/flow_render.h and adds a standalone test.
+  - `tab-focus` and `helper-lines` — same-file `src/flow_render.h` rebase notes *(post-execution correction; an earlier draft disclaimed both)*: #5's focus-ring post-pass sits immediately AFTER the node loop this package culls in; #8's guide overlay sits before the minimap call. Disjoint regions from the node-loop cull insert, but whichever lands later rebases line offsets.
+  - No conflict with keyboard-move / copy-paste / node-search / edge-events-inflight / validator-load-suspend: those touch the dispatch/feed key paths, struct flow's zero-init block, or flow_input.h; this package touches only the `flow_render` node loop and adds a standalone test.
 
 **Carry-overs fixed.**
   - Closes the inc-4 `22-culling` drift item ("partial": flag-skip exists, viewport-cull absent). After this, off-screen nodes are no longer projected-into-a-surface/clipped/dispatched every frame — the missing `onlyRenderVisibleElements` half of the inc-4 choke-point work, scoped to nodes-only and render-only as the PINNED rules require, and culling on the EXACT screen footprint `flow_hit_node` already uses so render and hit-test stay consistent.
@@ -994,7 +997,7 @@ int flow_find_nodes(flow_t *f, const char *needle, int *out, int max);
   - Uses already-landed `flow_select_node` (`src/flow_model.h:809`), `flow_bind_key`/`flow_dispatch_key` (`src/flow_model.h:1050-1081`), and the `flow_set_connection_validator` gate precedent (`src/flow_model.h:1016`).
 
 **Conflicts with.**
-  - **tab-focus** — also edits the `flow_dispatch_key`/`flow_feed` key path (its Tab/Shift-Tab/Enter handling) AND adds a `struct flow` field (`focus_node`) in the same zero-init block (by the validator fields, `src/flow_model.h:266`) where this package adds `key_hook_fn`/`key_hook_user`. Land order must keep both field appends and both dispatch insertions distinct; the hook sits ABOVE tab-focus's handling (it is pre-everything), so a modal palette correctly intercepts Tab while open.
+  - **tab-focus** — also edits the `flow_dispatch_key`/`flow_feed` key path (its Tab/Shift-Tab/Enter handling) AND adds a `struct flow` field (`focus_node`) in the same zero-init block (by the validator fields, `src/flow_model.h:266`) where this package adds `key_hook_fn`/`key_hook_user`. Land order must keep both field appends and both dispatch insertions distinct. *(Post-execution correction — the consistency pass struck a false claim here: the hook DOES sit above tab-focus's dispatch handling, but the v1 palette hook consumes only printables/Backspace/Enter/lone-ESC, so Tab (`\t`, a control byte) and the Shift-Tab/Shift-arrow CSIs PASS THROUGH and act behind an open palette — the signed-off v1 limitation, documented in Design notes and the demo.)*
   - **keyboard-move** — adds Shift-arrow (`\x1b[1;2A/B/C/D`) handling in the dispatch/feed key path; mutual note: the key hook precedes it, so Shift-arrows are intercepted while a modal is open.
   - **copy-paste** — adds `y/c/p/d` plain-letter built-ins/bindings on the same key path; mutual note: the hook precedes these too, so the palette consumes printable letters before copy-paste can claim them while open.
   - No conflict with the flow_query.h queries (purely additive function), the vtable append (zero-init safe for all other types), or `flow_callbacks` (no callbacks field added — this is a gate, per the GATES-vs-OBSERVERS rule).
@@ -1082,3 +1085,54 @@ INVERT and extend the existing `CROSS-EVENT PIN` block in `tests/test_connect.c:
 
 **Carry-overs fixed.**
   - Retires the `#6 deferral` recorded at `tests/test_connect.c:376-379` (the cross-event pin), replacing the "press consumed, no edge event" contract with the xyflow-aligned "end then edge event" fall-through, and extends the same fall-through to the pane, node-body, and right-click mid-flight paths for a uniform rule.
+
+---
+
+## Execution record (post-execution addendum, 2026-06-05)
+
+All eleven packages + the integration pass landed on branch `increment-5`, one commit each,
+in spine order — including all three stretch packages (kept at sign-off):
+
+| # | id | commit |
+|---|----|--------|
+| 1 | `minimap-visible-bounds` | `abe88f8` |
+| 2 | `validator-load-suspend` | `b2bf177` |
+| 3 | `marquee-world-anchor` | `3747539` |
+| 4 | `view-frame` | `c943d31` |
+| 5 | `tab-focus` | `3d437ba` |
+| 6 | `keyboard-move` | `5ac1989` |
+| 7 | `copy-paste` | `19a4a5d` |
+| 8 | `helper-lines` | `3236985` |
+| 9 | `viewport-culling` | `9015e15` |
+| 10 | `node-search` | `df226a5` |
+| 11 | `edge-events-inflight` | `e5a1052` |
+| — | integration pass | `79e976b` |
+
+Suite grew 25 → 30 test files (test_focus, test_clipboard, test_helper, test_culling,
+test_search); three new goldens (`render_focus`, `render_helper_snap`, `cull_crossing_edge`);
+every pre-existing golden byte-identical throughout.
+
+**Deviations from this spec, recorded in the package commit bodies:**
+
+- **#3** — the screen-space `marquee_anchor` field was REMOVED, not kept: post-fix it had
+  zero readers, and the spec's keep-rationale ("avoids re-deriving screen from world") is
+  contradicted by the render box, which must re-derive after a pan anyway.
+- **#10** — the `label` vtable append forced edits outside the Files-touched list: a
+  `-Wmissing-field-initializers` sweep caught `demos/topo.c` (gained a REAL `dev_label`
+  accessor — devices are now searchable), `tests/test_json.c` and `tests/test_culling.c`
+  (explicit NULLs). New standing gate: `make test` output swept for WARNINGS, not just
+  failures — an ABI-append is exactly the change that introduces them silently.
+- **#11** — the old consumed-press contract was pinned in a SECOND test site this spec's
+  plan did not list (`test_connect`'s connectOnClick cancel-on-empty block), inverted
+  coherently. The fall-through inherits the FULL click path — events AND side effects
+  (pane-cancel clears the selection) — locked by test.
+- **§3/§4/§9/§10 prose** — four cross-package consistency corrections produced at
+  spec-writing time failed to merge into the committed doc (assembly bug); repaired
+  in-place above, each marked *(post-execution correction)*.
+
+**Known limitations carried forward (increment-6 candidate material):** live-demo `q`
+quits even inside the palette (`flow_run` checks `q` before `flow_feed`); pasted group
+containers re-measure to content size (the `flow_load` convention — app-side re-derive);
+trailing-edge helper guides draw at the shared boundary column (half-open convention);
+the v1 palette does not modal-block Tab/Shift-arrows (full capture needs byte-count CSI
+parsing in the demo hook).
