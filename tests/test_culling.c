@@ -33,7 +33,7 @@ static void ct_render(const flow_node *n, flow_surface *s, flow_render_ctx ctx) 
   (void)n; (void)ctx; ct_renders++;
   flow_box(s, 0, 0, 5, 3, FLOW_FG, FLOW_BG, 0);
 }
-static const flow_node_type COUNTER = { "counter", ct_measure, ct_render, NULL, 0, NULL, NULL };
+static const flow_node_type COUNTER = { "counter", ct_measure, ct_render, NULL, 0, NULL, NULL, NULL };
 
 int main(void) {
   int cols = 30, rows = 8;

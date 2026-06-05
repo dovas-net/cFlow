@@ -70,8 +70,13 @@ static void dev_load(flow_node *n, const char *data_json) {
   if (flow__json_find(data_json, end, "os", &fld))     flow__json_strv(fld, d->os,     (int)sizeof d->os);
   n->data = d;
 }
+/* searchable label (inc-5 #10): the device's display name backs flow_find_nodes */
+static const char *dev_label(const flow_node *n) {
+  const device *d = (const device*)n->data;
+  return d ? d->label : NULL;
+}
 /* reuse the default LEFT-'in' / RIGHT-'out' ports so devices are connectable */
-static const flow_node_type DEVICE = { "device", dev_measure, dev_render, flow_default_handles, 2, dev_save, dev_load };
+static const flow_node_type DEVICE = { "device", dev_measure, dev_render, flow_default_handles, 2, dev_save, dev_load, dev_label };
 
 /* app state for the details panel */
 static int g_info_node = -1;

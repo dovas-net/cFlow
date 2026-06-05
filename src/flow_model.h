@@ -25,6 +25,9 @@ typedef struct { const char *type;
   const flow_handle *handles; int handle_count;
   void (*save)(const flow_node *n, FILE *out);        /* optional: write node->data as ONE JSON value (omitted if NULL) */
   void (*load)(flow_node *n, const char *data_json);  /* optional: parse node->data from a NUL-terminated copy of the "data" value span */
+  const char *(*label)(const flow_node *n);           /* optional (inc-5 #10): the node's searchable label, a NUL-terminated
+                                                         string owned by the node (lifetime = the node), or NULL. APPENDED LAST:
+                                                         zero-init keeps every existing initializer valid — NULL = unsearchable. */
 } flow_node_type;
 typedef struct { const char *type;
   void (*route)(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_route *out); } flow_edge_type;
@@ -162,6 +165,17 @@ typedef int (*flow_connection_validator)(flow_t *f, int source, int target,
                                          const char *source_handle, const char *target_handle,
                                          void *user);
 void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void *user);
+
+/* pre-dispatch key hook (inc-5 #10): a GATE on struct flow (this validator's
+   precedent — not a flow_callbacks observer). Called at the very top of
+   flow_dispatch_key, BEFORE flow_bind_key bindings and built-ins, with the raw
+   byte window. Returns BYTES CONSUMED: 0 = pass-through (dispatch continues);
+   a positive count is returned verbatim and flow_feed advances i by it — so a
+   modal can swallow a multibyte CSI by returning its length. Sees every
+   key/escape sequence but NOT mouse (flow_feed parses mouse CSI before
+   dispatch). NULL = no hook (calloc default), zero overhead. TRANSIENT. */
+typedef int (*flow_key_hook)(flow_t *f, const char *seq, int len, void *user);
+void flow_set_key_hook(flow_t *f, flow_key_hook fn, void *user);
 void flow_set_edge_label(flow_t *f, int edge, const char *label); /* strdup into edge->label, freeing prior; NULL clears */
 
 /* edge hit-test & endpoints — DEFINED in flow_render.h (need the render anchor helpers).
@@ -318,6 +332,7 @@ struct flow {
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
   flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */
+  flow_key_hook key_hook_fn; void *key_hook_user;                     /* pre-dispatch key gate (inc-5 #10); NULL = none (calloc default) */
   int reconnect_edge, reconnect_which;                        /* in-flight endpoint-reconnect drag: edge id (-1 idle) + which endpoint (0=source,1=target) */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
@@ -1253,6 +1268,9 @@ void flow_set_helper_lines(flow_t *f, int on) {
   f->helper_on = on;
   if (!on) { f->helper.nvert = 0; f->helper.nhorz = 0; }  /* OFF drops any live guides */
 }
+void flow_set_key_hook(flow_t *f, flow_key_hook fn, void *user) {
+  f->key_hook_fn = fn; f->key_hook_user = user;   /* NULL fn = no hook (default) */
+}
 void flow_set_node_hidden(flow_t *f, int id, int hidden) {
   flow_node *n = flow_get_node(f, id);
   if (!n) return;
@@ -1297,6 +1315,13 @@ void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user) {
 }
 int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (n <= 0) return 0;
+  /* (0) pre-dispatch key hook (inc-5 #10): a modal UI sees the bytes before ANY
+     binding or built-in; a positive return = bytes consumed, passed verbatim to
+     flow_feed's i-advance. 0 = pass-through to the registry below. */
+  if (f->key_hook_fn) {
+    int c = f->key_hook_fn(f, seq, n, f->key_hook_user);
+    if (c > 0) return c;
+  }
   /* (1) registry: longest registered seq that fully fits in n and byte-matches. */
   int best = -1; size_t bestlen = 0;
   for (int i = 0; i < f->nkeys; i++) {

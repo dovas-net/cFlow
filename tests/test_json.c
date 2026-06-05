@@ -39,7 +39,8 @@ static void dev_load(flow_node *n, const char *data_json) {
   n->data = d;   /* app-owned; library never frees it */
 }
 static const flow_node_type DEVICE = {
-  "device", dev_measure, dev_render, flow_default_handles, 2, dev_save, dev_load
+  "device", dev_measure, dev_render, flow_default_handles, 2, dev_save, dev_load,
+  NULL  /* no label accessor: this test exercises save/load, not search (inc-5 #10) */
 };
 
 /* free every device the load hook mallocked, then free the flow */

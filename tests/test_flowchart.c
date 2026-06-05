@@ -140,6 +140,51 @@ int main(void) {
     ASSERT(!(flow_get_node(f, start2)->flags & FLOW_HIDDEN), "'H' shows all again");
   }
 
+  /* ---- inc-5 #10: '/' command palette (key hook + flow_find_nodes + framing).
+     Seven searchable labels: start/validate/valid?/save/reject/done + the group
+     container 'branches' (the group type's new label() accessor). ---- */
+  {
+    int m[8];
+    flow_feed(f, "/", 1);                              /* open via the registry binding */
+    ASSERT_INT(fc_pal.open, 1, "'/' opens the palette");
+    flow_feed(f, "s", 1);                              /* hook consumes the printable */
+    ASSERT_INT(fc_pal.qn, 1, "query took the char (not the engine/demo 's' paths)");
+    ASSERT_INT(fc_pal_matches(f, m, 8), 3, "'s' matches start+save+branches");
+    flow_feed(f, "a", 1);
+    ASSERT_INT(fc_pal_matches(f, m, 8), 1, "'sa' narrows to save (substring, not prefix)");
+    ASSERT_INT(m[0], by_label(f, "save"), "  the match IS save");
+    flow_feed(f, "\x7f", 1);                           /* Backspace */
+    ASSERT_INT(fc_pal.qn, 1, "Backspace shrank the query to 's'");
+    ASSERT_INT(fc_pal_matches(f, m, 8), 3, "  match set re-widened");
+    flow_feed(f, "a", 1);                              /* back to 'sa' */
+    float ox0 = f->view.ox, oy0 = f->view.oy;
+    flow_feed(f, "\r", 1);                             /* Enter: select + frame */
+    ASSERT_INT(fc_pal.open, 0, "Enter closes the palette");
+    ASSERT_INT(flow_selected_node(f), by_label(f, "save"), "Enter selected the first match");
+    ASSERT(f->view.ox != ox0 || f->view.oy != oy0, "Enter framed the match (view moved)");
+
+    /* lone ESC closes without selecting; CSIs pass through (arrows still pan) */
+    int sel_before = flow_selected_node(f);
+    flow_feed(f, "/", 1);
+    ASSERT_INT(fc_pal.open, 1, "palette reopens");
+    float oy1 = f->view.oy;
+    flow_feed(f, "\x1b[A", 3);                         /* arrow CSI: hook passes it */
+    ASSERT(f->view.oy != oy1, "arrow pans while the palette is open (CSI pass-through)");
+    ASSERT_INT(fc_pal.open, 1, "  palette stayed open");
+    flow_feed(f, "\x1b", 1);                           /* lone ESC */
+    ASSERT_INT(fc_pal.open, 0, "lone ESC closes the palette");
+    ASSERT_INT(flow_selected_node(f), sel_before, "  selection unchanged");
+
+    /* hidden nodes are skipped by the PALETTE (view-level UI choice over the
+       model-level query, which includes them) */
+    flow_set_node_hidden(f, by_label(f, "save"), 1);
+    flow_feed(f, "/", 1); flow_feed(f, "s", 1); flow_feed(f, "a", 1);
+    ASSERT_INT(fc_pal_matches(f, m, 8), 0, "palette skips the hidden match");
+    ASSERT_INT(flow_find_nodes(f, "sa", m, 8), 1, "  engine query still includes it (model-level)");
+    flow_feed(f, "\x1b", 1);
+    flow_set_node_hidden(f, by_label(f, "save"), 0);
+  }
+
   flow_free(f);
   return flowtest_report("test_flowchart");
 }

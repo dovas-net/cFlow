@@ -24,7 +24,12 @@ const flow_handle flow_default_handles[2] = {
   { "in",  FLOW_HANDLE_TARGET, FLOW_LEFT,  0 },   /* input on left border  */
   { "out", FLOW_HANDLE_SOURCE, FLOW_RIGHT, 0 },   /* output on right border */
 };
-const flow_node_type flow_default_node_type = { "default", flow__default_measure, flow__default_render, flow_default_handles, 2, NULL, NULL };
+/* label accessor (inc-5 #10): both built-in types already treat n->data as the
+   C-string label (measure/render above) — expose the same read for flow_find_nodes. */
+static const char *flow__cstr_label(const flow_node *n) {
+  return n->data ? (const char*)n->data : NULL;
+}
+const flow_node_type flow_default_node_type = { "default", flow__default_measure, flow__default_render, flow_default_handles, 2, NULL, NULL, flow__cstr_label };
 /* group container: measure is a WRITE-BACK no-op — flow_measure_node does
    `int w=0,h=0; measure(n,&w,&h); n->w=w; n->h=h;`, so to leave the caller-set bbox
    size intact we must echo the node's CURRENT w/h back out (an empty body would zero
@@ -43,7 +48,7 @@ static void flow__group_render(const flow_node *n, flow_surface *s, flow_render_
 /* group has NO handles (containers aren't connectable in v1): handle_count==0 leaves
    flow_hit_handle/edge anchoring untouched. No save/load hooks (parent is durable via the
    node field; the app re-registers this type on load). */
-const flow_node_type flow_group_node_type = { "group", flow__group_measure, flow__group_render, NULL, 0, NULL, NULL };
+const flow_node_type flow_group_node_type = { "group", flow__group_measure, flow__group_render, NULL, 0, NULL, NULL, flow__cstr_label };
 void flow_register_defaults(flow_t *f) {
   flow_register_node_type(f, &flow_default_node_type);
   flow_register_node_type(f, &flow_group_node_type);

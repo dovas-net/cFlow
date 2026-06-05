@@ -196,6 +196,9 @@ typedef struct { const char *type;
   const flow_handle *handles; int handle_count;
   void (*save)(const flow_node *n, FILE *out);        /* optional: write node->data as ONE JSON value (omitted if NULL) */
   void (*load)(flow_node *n, const char *data_json);  /* optional: parse node->data from a NUL-terminated copy of the "data" value span */
+  const char *(*label)(const flow_node *n);           /* optional (inc-5 #10): the node's searchable label, a NUL-terminated
+                                                         string owned by the node (lifetime = the node), or NULL. APPENDED LAST:
+                                                         zero-init keeps every existing initializer valid — NULL = unsearchable. */
 } flow_node_type;
 typedef struct { const char *type;
   void (*route)(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_route *out); } flow_edge_type;
@@ -333,6 +336,17 @@ typedef int (*flow_connection_validator)(flow_t *f, int source, int target,
                                          const char *source_handle, const char *target_handle,
                                          void *user);
 void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void *user);
+
+/* pre-dispatch key hook (inc-5 #10): a GATE on struct flow (this validator's
+   precedent — not a flow_callbacks observer). Called at the very top of
+   flow_dispatch_key, BEFORE flow_bind_key bindings and built-ins, with the raw
+   byte window. Returns BYTES CONSUMED: 0 = pass-through (dispatch continues);
+   a positive count is returned verbatim and flow_feed advances i by it — so a
+   modal can swallow a multibyte CSI by returning its length. Sees every
+   key/escape sequence but NOT mouse (flow_feed parses mouse CSI before
+   dispatch). NULL = no hook (calloc default), zero overhead. TRANSIENT. */
+typedef int (*flow_key_hook)(flow_t *f, const char *seq, int len, void *user);
+void flow_set_key_hook(flow_t *f, flow_key_hook fn, void *user);
 void flow_set_edge_label(flow_t *f, int edge, const char *label); /* strdup into edge->label, freeing prior; NULL clears */
 
 /* edge hit-test & endpoints — DEFINED in flow_render.h (need the render anchor helpers).
@@ -489,6 +503,7 @@ struct flow {
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
   flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */
+  flow_key_hook key_hook_fn; void *key_hook_user;                     /* pre-dispatch key gate (inc-5 #10); NULL = none (calloc default) */
   int reconnect_edge, reconnect_which;                        /* in-flight endpoint-reconnect drag: edge id (-1 idle) + which endpoint (0=source,1=target) */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
@@ -1424,6 +1439,9 @@ void flow_set_helper_lines(flow_t *f, int on) {
   f->helper_on = on;
   if (!on) { f->helper.nvert = 0; f->helper.nhorz = 0; }  /* OFF drops any live guides */
 }
+void flow_set_key_hook(flow_t *f, flow_key_hook fn, void *user) {
+  f->key_hook_fn = fn; f->key_hook_user = user;   /* NULL fn = no hook (default) */
+}
 void flow_set_node_hidden(flow_t *f, int id, int hidden) {
   flow_node *n = flow_get_node(f, id);
   if (!n) return;
@@ -1468,6 +1486,13 @@ void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user) {
 }
 int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (n <= 0) return 0;
+  /* (0) pre-dispatch key hook (inc-5 #10): a modal UI sees the bytes before ANY
+     binding or built-in; a positive return = bytes consumed, passed verbatim to
+     flow_feed's i-advance. 0 = pass-through to the registry below. */
+  if (f->key_hook_fn) {
+    int c = f->key_hook_fn(f, seq, n, f->key_hook_user);
+    if (c > 0) return c;
+  }
   /* (1) registry: longest registered seq that fully fits in n and byte-matches. */
   int best = -1; size_t bestlen = 0;
   for (int i = 0; i < f->nkeys; i++) {
@@ -1855,6 +1880,12 @@ int flow_connected_edges(flow_t *f, int node, int *out, int max); /* EVERY edge 
 int flow_intersecting_nodes(flow_t *f, flow_rect world, int *out, int max); /* all nodes whose absolute rect intersects `world` */
 int flow_node_intersections(flow_t *f, int node, int *out, int max);        /* nodes intersecting `node`'s absolute rect, EXCLUDING node itself; missing id -> 0 */
 
+/* label search (inc-5 #10): case-insensitive substring match over the optional
+   label() vtable accessor. MODEL-level like every query here (hidden INCLUDED),
+   insertion order, fill-buffer idiom, no allocation. needle=="" matches every
+   LABELED node; a type with label==NULL (the zero-init default) never matches. */
+int flow_find_nodes(flow_t *f, const char *needle, int *out, int max);
+
 #ifdef FLOW_IMPLEMENTATION
 /* shared walk: dir 0 = incomers (edges INTO node, emit sources), dir 1 = outgoers
    (edges FROM node, emit targets). Dedup without allocation: for each candidate,
@@ -1917,6 +1948,28 @@ int flow_node_intersections(flow_t *f, int node, int *out, int max) {
   flow_node *n = flow_get_node(f, node);
   if (!n) return 0;
   return flow__rect_sweep(f, flow_node_rect_abs(f, n), node, out, max);
+}
+/* allocation-free case fold (no strcasestr in C11; ASCII only — labels are the
+   demo C-strings, and a multibyte UTF-8 lead never folds into [a-z] range). */
+static int flow__fold(unsigned char c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+int flow_find_nodes(flow_t *f, const char *needle, int *out, int max) {
+  if (!needle) return 0;
+  int count = 0;
+  for (int i = 0; i < f->nnodes; i++) {
+    const flow_node_type *t = flow_node_type_for(f, f->nodes[i].type);
+    const char *lab = (t && t->label) ? t->label(&f->nodes[i]) : NULL;
+    if (!lab) continue;                              /* unlabeled type: unsearchable */
+    int hit = (needle[0] == 0);                      /* empty needle: every labeled node */
+    for (const char *s = lab; *s && !hit; s++) {     /* two-pointer folded substring scan */
+      const char *a = s, *b = needle;
+      while (*a && *b && flow__fold((unsigned char)*a) == flow__fold((unsigned char)*b)) { a++; b++; }
+      if (!*b) hit = 1;
+    }
+    if (!hit) continue;
+    if (count < max && out) out[count] = f->nodes[i].id;
+    count++;
+  }
+  return count;
 }
 #endif
 /* ===================== src/flow_view.h ===================== */
@@ -2428,7 +2481,12 @@ const flow_handle flow_default_handles[2] = {
   { "in",  FLOW_HANDLE_TARGET, FLOW_LEFT,  0 },   /* input on left border  */
   { "out", FLOW_HANDLE_SOURCE, FLOW_RIGHT, 0 },   /* output on right border */
 };
-const flow_node_type flow_default_node_type = { "default", flow__default_measure, flow__default_render, flow_default_handles, 2, NULL, NULL };
+/* label accessor (inc-5 #10): both built-in types already treat n->data as the
+   C-string label (measure/render above) — expose the same read for flow_find_nodes. */
+static const char *flow__cstr_label(const flow_node *n) {
+  return n->data ? (const char*)n->data : NULL;
+}
+const flow_node_type flow_default_node_type = { "default", flow__default_measure, flow__default_render, flow_default_handles, 2, NULL, NULL, flow__cstr_label };
 /* group container: measure is a WRITE-BACK no-op — flow_measure_node does
    `int w=0,h=0; measure(n,&w,&h); n->w=w; n->h=h;`, so to leave the caller-set bbox
    size intact we must echo the node's CURRENT w/h back out (an empty body would zero
@@ -2447,7 +2505,7 @@ static void flow__group_render(const flow_node *n, flow_surface *s, flow_render_
 /* group has NO handles (containers aren't connectable in v1): handle_count==0 leaves
    flow_hit_handle/edge anchoring untouched. No save/load hooks (parent is durable via the
    node field; the app re-registers this type on load). */
-const flow_node_type flow_group_node_type = { "group", flow__group_measure, flow__group_render, NULL, 0, NULL, NULL };
+const flow_node_type flow_group_node_type = { "group", flow__group_measure, flow__group_render, NULL, 0, NULL, NULL, flow__cstr_label };
 void flow_register_defaults(flow_t *f) {
   flow_register_node_type(f, &flow_default_node_type);
   flow_register_node_type(f, &flow_group_node_type);

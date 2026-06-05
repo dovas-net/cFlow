@@ -20,6 +20,12 @@ int flow_connected_edges(flow_t *f, int node, int *out, int max); /* EVERY edge 
 int flow_intersecting_nodes(flow_t *f, flow_rect world, int *out, int max); /* all nodes whose absolute rect intersects `world` */
 int flow_node_intersections(flow_t *f, int node, int *out, int max);        /* nodes intersecting `node`'s absolute rect, EXCLUDING node itself; missing id -> 0 */
 
+/* label search (inc-5 #10): case-insensitive substring match over the optional
+   label() vtable accessor. MODEL-level like every query here (hidden INCLUDED),
+   insertion order, fill-buffer idiom, no allocation. needle=="" matches every
+   LABELED node; a type with label==NULL (the zero-init default) never matches. */
+int flow_find_nodes(flow_t *f, const char *needle, int *out, int max);
+
 #ifdef FLOW_IMPLEMENTATION
 /* shared walk: dir 0 = incomers (edges INTO node, emit sources), dir 1 = outgoers
    (edges FROM node, emit targets). Dedup without allocation: for each candidate,
@@ -82,5 +88,27 @@ int flow_node_intersections(flow_t *f, int node, int *out, int max) {
   flow_node *n = flow_get_node(f, node);
   if (!n) return 0;
   return flow__rect_sweep(f, flow_node_rect_abs(f, n), node, out, max);
+}
+/* allocation-free case fold (no strcasestr in C11; ASCII only — labels are the
+   demo C-strings, and a multibyte UTF-8 lead never folds into [a-z] range). */
+static int flow__fold(unsigned char c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+int flow_find_nodes(flow_t *f, const char *needle, int *out, int max) {
+  if (!needle) return 0;
+  int count = 0;
+  for (int i = 0; i < f->nnodes; i++) {
+    const flow_node_type *t = flow_node_type_for(f, f->nodes[i].type);
+    const char *lab = (t && t->label) ? t->label(&f->nodes[i]) : NULL;
+    if (!lab) continue;                              /* unlabeled type: unsearchable */
+    int hit = (needle[0] == 0);                      /* empty needle: every labeled node */
+    for (const char *s = lab; *s && !hit; s++) {     /* two-pointer folded substring scan */
+      const char *a = s, *b = needle;
+      while (*a && *b && flow__fold((unsigned char)*a) == flow__fold((unsigned char)*b)) { a++; b++; }
+      if (!*b) hit = 1;
+    }
+    if (!hit) continue;
+    if (count < max && out) out[count] = f->nodes[i].id;
+    count++;
+  }
+  return count;
 }
 #endif

@@ -107,11 +107,71 @@ static int fc_no_cycles(flow_t *f, int src, int tgt, const char *sh, const char 
   (void)sh; (void)th; (void)u;
   return !fc_reaches(f, tgt, src);
 }
-static void fc_overlay(flow_t *f, flow_surface *s, void *u) {
+/* '/' command palette (inc-5 #10): a modal search built on the engine's key hook
+   + flow_find_nodes + view-frame framing. While open, the hook consumes printable
+   chars (incremental query), Backspace, Enter (select + frame the first match),
+   and lone ESC (close). v1 LIMITATION (documented at sign-off): control bytes and
+   CSIs pass through — Tab focus, Shift-arrows, and bare-arrow pan still act while
+   the palette is open (full capture would need byte-count CSI parsing here).
+   The palette skips HIDDEN nodes — a view-level UI choice over the model-level
+   flow_find_nodes (which includes them by the layering rule). */
+static struct { int open; char q[32]; int qn; } fc_pal;
+static int fc_pal_matches(flow_t *f, int *out, int max) {
+  int all[64];
+  int n = flow_find_nodes(f, fc_pal.q, all, 64); if (n > 64) n = 64;
+  int c = 0;
+  for (int i = 0; i < n; i++) {
+    flow_node *nd = flow_get_node(f, all[i]);
+    if (!nd || (nd->flags & FLOW_HIDDEN)) continue;   /* view-level skip */
+    if (c < max && out) out[c] = all[i];
+    c++;
+  }
+  return c;
+}
+static int fc_pal_hook(flow_t *f, const char *seq, int len, void *user) {
+  (void)user;
+  if (!fc_pal.open) return 0;
+  unsigned char c = (unsigned char)seq[0];
+  if (c == 0x1b) {                                    /* mirror flow_feed's loneness test */
+    if (len >= 2 && seq[1] == '[') return 0;          /* CSI: arrows/Delete pass through */
+    fc_pal.open = 0; return 1;                        /* lone ESC closes */
+  }
+  if (c == '\r') {                                    /* Enter: select + frame first match */
+    int first;
+    if (fc_pal_matches(f, &first, 1) > 0) {
+      flow_select_node(f, first, 0);
+      flow_rect r = flow_bounds_of(f, &first, 1);     /* view-frame (inc-5 #4) */
+      flow_set_center(f, r.x + r.w / 2, r.y + r.h / 2, -1.0f);
+    }
+    fc_pal.open = 0; return 1;
+  }
+  if (c == 0x7f || c == 0x08) {                       /* Backspace */
+    if (fc_pal.qn > 0) fc_pal.q[--fc_pal.qn] = 0;
+    return 1;
+  }
+  if (c >= 0x20 && c < 0x7f) {                        /* printable: append to the query */
+    if (fc_pal.qn < (int)sizeof fc_pal.q - 1) { fc_pal.q[fc_pal.qn++] = (char)c; fc_pal.q[fc_pal.qn] = 0; }
+    return 1;
+  }
+  return 0;                                           /* other control bytes: pass (v1) */
+}
+static void key_palette(flow_t *f, void *u) {
   (void)f; (void)u;
-  flow_text(s, 1, 0, "flowchart  l:layout  g:group  G:ungroup  h:hide sel  H:show all  q:quit",
+  fc_pal.open = 1; fc_pal.qn = 0; fc_pal.q[0] = 0;
+}
+static void fc_overlay(flow_t *f, flow_surface *s, void *u) {
+  (void)u;
+  flow_text(s, 1, 0, "flowchart  l:layout  g:group  G:ungroup  h:hide sel  H:show all  /:find  q:quit",
             FLOW_FG, FLOW_BG, FLOW_BOLD);
   if (fc_event[0]) flow_text(s, 1, 1, fc_event, FLOW_FG, FLOW_BG, FLOW_DIM);
+  if (fc_pal.open) {
+    char line[96]; int m[1]; int n = fc_pal_matches(f, m, 1);
+    const char *firstlab = "";
+    if (n > 0) { flow_node *nd = flow_get_node(f, m[0]); if (nd && nd->data) firstlab = (const char*)nd->data; }
+    snprintf(line, sizeof line, " find: %s_  (%d match%s%s%s) ",
+             fc_pal.q, n, n == 1 ? "" : "es", n > 0 ? " -> " : "", firstlab);
+    flow_text(s, 1, 2, line, FLOW_FG, FLOW_BG, FLOW_REVERSE);
+  }
 }
 
 /* Build the chart, arrange it, box the branches. Returns the group's node id.
@@ -140,6 +200,9 @@ static int flowchart_setup(flow_t *f) {
   flow_bind_key(f, "G", key_ungroup,  NULL);
   flow_bind_key(f, "h", key_hide,     NULL);
   flow_bind_key(f, "H", key_show_all, NULL);
+  flow_bind_key(f, "/", key_palette,  NULL);    /* command palette (inc-5 #10): the hook
+                                                   below consumes input only WHILE open */
+  flow_set_key_hook(f, fc_pal_hook, NULL);
   flow_callbacks cb = {0};
   cb.on_overlay = fc_overlay;
   cb.on_connect_end = fc_on_connect_end;        /* ticker: success / reject / abort verdicts */
