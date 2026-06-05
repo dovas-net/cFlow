@@ -607,6 +607,28 @@ void flow_move_node(flow_t *f, int id, flow_pt pos) {
   n->pos.x = pos.x - pa.x; n->pos.y = pos.y - pa.y;
 }
 flow_pt flow_node_pos(const flow_node *n) { return n->pos; }
+/* Shift-arrow nudge mover (inc-5 #6): move every selection ROOT — a FLOW_SELECTED
+   node with no STRICT selected ancestor — by (dx,dy) world cells via flow_move_node
+   (absolute-in, so extent clamps apply per node). MIRRORS the multi-drag roots walk
+   in flow_input.h deliberately (extracting a shared mover would widen the package's
+   blast radius into the byte-locked drag goldens); a root's selected descendants
+   follow for free via relative coords. Eventless: flow_move_node fires no observer
+   and the FLOW_SELECTED set is untouched. Caller brackets undo. */
+static void flow__nudge_selection(flow_t *f, int dx, int dy) {
+  for (int i = 0; i < f->nnodes; i++) {
+    if (!(f->nodes[i].flags & FLOW_SELECTED)) continue;
+    int root = 1;                            /* root unless a STRICT ancestor is selected */
+    int parent = f->nodes[i].parent, guard = 0;
+    while (parent != -1 && guard++ < 1024) {
+      flow_node *pn = flow_get_node(f, parent); if (!pn) break;
+      if (pn->flags & FLOW_SELECTED) { root = 0; break; }
+      parent = pn->parent;
+    }
+    if (!root) continue;
+    flow_pt a = flow_node_abs(f, &f->nodes[i]);
+    flow_move_node(f, f->nodes[i].id, (flow_pt){ a.x + dx, a.y + dy });
+  }
+}
 /* depth = length of the parent chain (0 for top-level). O(depth) walk, cycle-guarded. */
 static int flow__node_depth(flow_t *f, const flow_node *n) {
   int d = 0, parent = n->parent, guard = 0;

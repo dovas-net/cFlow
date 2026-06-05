@@ -32,6 +32,24 @@ void flow_feed(flow_t *f, const char *b, int n) {
                                                              trailing i++ mis-parsed "[Z" */
         default: break;
       }
+      /* Shift-arrow selection nudge (inc-5 #6): 6-byte \x1b[1;2{A,B,C,D} moves the
+         FLOW_SELECTED set 1 world cell. The nudge delta is the NEGATION of the bare
+         arrow's pan arg on every key (pan moves the camera, nudge moves the node;
+         world-y grows downward): A up (0,-1), B down (0,+1), C right (+1,0), D left
+         (-1,0). b[i+2]=='1' here, so the 3-byte switch above never collides. Consumed
+         on EVERY path — incl. the empty-selection no-op, which opens no undo bracket
+         (no pan fallback: Shift-arrow behavior must not be selection-dependent). */
+      if (i + 5 < n && b[i+2] == '1' && b[i+3] == ';' && b[i+4] == '2' &&
+          (b[i+5] == 'A' || b[i+5] == 'B' || b[i+5] == 'C' || b[i+5] == 'D')) {
+        if (flow_selected_count(f) > 0) {
+          int dx = b[i+5] == 'C' ? 1 : (b[i+5] == 'D' ? -1 : 0);
+          int dy = b[i+5] == 'B' ? 1 : (b[i+5] == 'A' ? -1 : 0);
+          flow__undo_begin(f);                /* multi-node nudge = ONE undo step */
+          flow__nudge_selection(f, dx, dy);
+          flow__undo_end(f);
+        }
+        i += 6; continue;
+      }
     }
     /* +/- zoom (keyboard has no cursor, so center on the screen centre). Placed AFTER
        flow_dispatch_key so a user flow_bind_key('+') override still wins via the registry. */

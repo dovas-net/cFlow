@@ -270,5 +270,74 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- Shift-arrow selection nudge (inc-5 #6): \x1b[1;2{A,B,C,D} moves the
+     FLOW_SELECTED set 1 world cell (A up, B down, C right, D left); bare arrows
+     keep panning. One undo step per press; extent clamps apply; empty selection
+     is a consumed no-op (no pan fallback, no journal step). ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 10}, (void*)"A");
+    flow_select_node(f, a, 0);
+    int j0 = f->journal.n;
+    flow_feed(f, "\x1b[1;2A", 6);
+    ASSERT_INT(flow_get_node(f, a)->pos.y, 9,  "Shift-Up: world y -1");
+    flow_feed(f, "\x1b[1;2B", 6);
+    ASSERT_INT(flow_get_node(f, a)->pos.y, 10, "Shift-Down: world y +1 (back)");
+    flow_feed(f, "\x1b[1;2C", 6);
+    ASSERT_INT(flow_get_node(f, a)->pos.x, 11, "Shift-Right: world x +1");
+    flow_feed(f, "\x1b[1;2D", 6);
+    ASSERT_INT(flow_get_node(f, a)->pos.x, 10, "Shift-Left: world x -1 (back)");
+    ASSERT_INT(f->journal.n, j0 + 4, "one undo step per press");
+    flow_feed(f, "u", 1);                               /* undo the last nudge (D) */
+    flow_node *au = flow_get_node(f, a);                /* guarded: in a broken state undo
+                                                           could pop the ADD instead */
+    ASSERT(au != NULL && au->pos.x == 11, "undo reverses the last nudge");
+
+    /* MULTI-RIGID: two top-level nodes share one delta, one journal step */
+    int b = flow_add_node(f, "default", (flow_pt){0, 0}, (void*)"B");
+    int c = flow_add_node(f, "default", (flow_pt){5, 0}, (void*)"C");
+    flow_select_node(f, b, 0); flow_select_node(f, c, 1);
+    int j1 = f->journal.n;
+    flow_feed(f, "\x1b[1;2C", 6);
+    ASSERT_INT(flow_get_node(f, b)->pos.x, 1, "multi-rigid: B moved +1");
+    ASSERT_INT(flow_get_node(f, c)->pos.x, 6, "multi-rigid: C moved +1 (same delta)");
+    ASSERT_INT(f->journal.n, j1 + 1, "multi-nudge = ONE journal step");
+
+    /* NO-DOUBLE-MOVE: selected child of a selected parent follows, not adds */
+    int p  = flow_add_node(f, "default", (flow_pt){30, 10}, (void*)"P");
+    flow_node *pn = flow_get_node(f, p); pn->w = 20; pn->h = 10;   /* parent rect (30,10,20,10) */
+    int ch = flow_add_node(f, "default", (flow_pt){35, 12}, (void*)"k");
+    flow_set_parent(f, ch, p);                                     /* abs preserved */
+    flow_select_node(f, p, 0); flow_select_node(f, ch, 1);
+    flow_pt ca0 = flow_node_abs(f, flow_get_node(f, ch));
+    flow_feed(f, "\x1b[1;2B", 6);
+    flow_pt ca1 = flow_node_abs(f, flow_get_node(f, ch));
+    ASSERT_INT(ca1.y, ca0.y + 1, "selected child of selected parent moves exactly +1 (not +2)");
+    ASSERT_INT(flow_get_node(f, p)->pos.y, 11, "parent (the root) moved +1");
+
+    /* CHILD-EXTENT CLAMP: nudge into the parent wall is clamped (unchanged) */
+    flow_get_node(f, ch)->flags |= FLOW_EXTENT_PARENT;
+    flow_move_node(f, ch, (flow_pt){35, 18});            /* flush: 18+3 == 21 == parent bottom (11+10) */
+    flow_select_node(f, ch, 0);                          /* child only */
+    flow_pt cb0 = flow_node_abs(f, flow_get_node(f, ch));
+    flow_feed(f, "\x1b[1;2B", 6);
+    flow_pt cb1 = flow_node_abs(f, flow_get_node(f, ch));
+    ASSERT_INT(cb1.y, cb0.y, "nudge into the parent wall: clamped, abs unchanged");
+
+    /* PLAIN-ARROW PAN STILL WORKS (no regression) */
+    float oy0 = f->view.oy;
+    flow_feed(f, "\x1b[A", 3);
+    ASSERT(f->view.oy != oy0, "bare arrow still pans");
+
+    /* EMPTY-SELECTION NO-OP: consumed, no move, no journal step, no pan */
+    flow_clear_selection(f);
+    int j2 = f->journal.n; float oy1 = f->view.oy; int bx = flow_get_node(f, b)->pos.x;
+    flow_feed(f, "\x1b[1;2A", 6);
+    ASSERT_INT(f->journal.n, j2, "empty selection: no journal step");
+    ASSERT(f->view.oy == oy1, "empty selection: did NOT fall through to pan");
+    ASSERT_INT(flow_get_node(f, b)->pos.x, bx, "empty selection: nothing moved");
+    flow_free(f);
+  }
+
   return flowtest_report("test_keys");
 }
