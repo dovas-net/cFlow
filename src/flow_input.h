@@ -229,9 +229,66 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           }
           f->drag_last_world = w;
         }
-      } else {                                    /* single node: grab-offset move (unchanged) */
+      } else {                                    /* single node: grab-offset move */
         flow_pt w = flow_to_world(f, scr);
-        flow_move_node(f, f->drag_node, (flow_pt){ w.x - f->drag_grab.x, w.y - f->drag_grab.y });
+        flow_pt t = { w.x - f->drag_grab.x, w.y - f->drag_grab.y };
+        /* alignment helper lines + snap (inc-5 #8): with helper_on, pull the
+           prospective top-left onto the nearest VISIBLE neighbor edge within
+           1 cell (per axis, L/R/T/B), then record every exactly-coincident edge
+           as a guide world line. OFF (the calloc default) skips everything —
+           the move below is byte-for-byte the landed behavior. Single-node
+           drags only; the multi-drag branch above is deliberately untouched. */
+        if (f->helper_on) {
+          flow_node *dn = flow_get_node(f, f->drag_node);
+          if (dn) {
+            int bw = dn->w, bh = dn->h;
+            int bestdx = 2, snapx = 0;            /* |delta| <= 1 wins; 2 = none */
+            int bestdy = 2, snapy = 0;
+            f->helper.nvert = 0; f->helper.nhorz = 0;
+            for (int i = 0; i < f->nnodes; i++) {
+              flow_node *cn = &f->nodes[i];
+              if (cn->id == f->drag_node) continue;
+              if (!flow__node_visible(f, cn)) continue;   /* guides are VIEW-level */
+              flow_rect cr = flow_node_rect_abs(f, cn);
+              int ce[2]; int k;
+              ce[0] = cr.x; ce[1] = cr.x + cr.w;          /* candidate x edges */
+              for (k = 0; k < 2; k++) {
+                int dl = ce[k] - t.x, dr = ce[k] - (t.x + bw);   /* leading/trailing delta */
+                if (dl >= -1 && dl <= 1 && (dl < 0 ? -dl : dl) < (bestdx < 0 ? -bestdx : bestdx)) { bestdx = dl; snapx = 1; }
+                if (dr >= -1 && dr <= 1 && (dr < 0 ? -dr : dr) < (bestdx < 0 ? -bestdx : bestdx)) { bestdx = dr; snapx = 1; }
+              }
+              ce[0] = cr.y; ce[1] = cr.y + cr.h;          /* candidate y edges */
+              for (k = 0; k < 2; k++) {
+                int dt2 = ce[k] - t.y, db = ce[k] - (t.y + bh);
+                if (dt2 >= -1 && dt2 <= 1 && (dt2 < 0 ? -dt2 : dt2) < (bestdy < 0 ? -bestdy : bestdy)) { bestdy = dt2; snapy = 1; }
+                if (db >= -1 && db <= 1 && (db < 0 ? -db : db) < (bestdy < 0 ? -bestdy : bestdy)) { bestdy = db; snapy = 1; }
+              }
+            }
+            if (snapx) t.x += bestdx;                     /* coincide the matched edge */
+            if (snapy) t.y += bestdy;
+            /* second sweep: record every edge that EXACTLY coincides post-snap */
+            for (int i = 0; i < f->nnodes; i++) {
+              flow_node *cn = &f->nodes[i];
+              if (cn->id == f->drag_node) continue;
+              if (!flow__node_visible(f, cn)) continue;
+              flow_rect cr = flow_node_rect_abs(f, cn);
+              int ex[2] = { cr.x, cr.x + cr.w }, ey[2] = { cr.y, cr.y + cr.h };
+              for (int k = 0; k < 2; k++) {
+                if ((ex[k] == t.x || ex[k] == t.x + bw) && f->helper.nvert < 8) {
+                  int dup = 0;
+                  for (int m = 0; m < f->helper.nvert; m++) if (f->helper.vert[m] == ex[k]) dup = 1;
+                  if (!dup) f->helper.vert[f->helper.nvert++] = ex[k];
+                }
+                if ((ey[k] == t.y || ey[k] == t.y + bh) && f->helper.nhorz < 8) {
+                  int dup = 0;
+                  for (int m = 0; m < f->helper.nhorz; m++) if (f->helper.horz[m] == ey[k]) dup = 1;
+                  if (!dup) f->helper.horz[f->helper.nhorz++] = ey[k];
+                }
+              }
+            }
+          }
+        }
+        flow_move_node(f, f->drag_node, t);
       }
     } else if (f->dragging_pan) {
       flow_pan(f, scr.x - f->last_mouse.x, scr.y - f->last_mouse.y);
@@ -256,6 +313,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->reconnect_edge = -1; f->mouse_down = 0; f->moved = 0; f->down_node = -1;
       f->drag_node = -1; f->dragging_pan = 0; f->down_modsel = 0;
       f->marquee_active = 0; f->marquee_on = 0;
+      f->helper.nvert = 0; f->helper.nhorz = 0;  /* guides never outlive the gesture (inc-5 #8) */
       flow__undo_end(f);                       /* pairs with the press-time begin (no-drag click: empty txn) */
       return;
     }
@@ -331,6 +389,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (f->moved) f->last_click_node = -1;       /* any drag breaks a double-click pair */
     f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
     f->down_modsel = 0; f->marquee_active = 0; f->marquee_on = 0;
+    f->helper.nvert = 0; f->helper.nhorz = 0;    /* guides never outlive the gesture (inc-5 #8) */
   }
 }
 #endif

@@ -278,6 +278,15 @@ void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h);
 typedef enum { FLOW_BG_NONE, FLOW_BG_DOTS, FLOW_BG_LINES, FLOW_BG_CROSS } flow_bg_variant;
 void flow_set_background(flow_t *f, flow_bg_variant variant, int gap);
 
+/* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
+   xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
+   the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
+   within 1 cell of a VISIBLE neighbor's matching-axis edge snaps onto it and a
+   full-row/column dashed guide draws for every exactly-coincident edge.
+   Single-node drags only (multi-drag has no single anchor rect). Transient:
+   not saved/journaled; guides clear on release. */
+void flow_set_helper_lines(flow_t *f, int on);
+
 #ifdef FLOW_IMPLEMENTATION
 struct flow {
   flow_node *nodes; int nnodes, capnodes, nextid;
@@ -302,6 +311,10 @@ struct flow {
                                      the rect grows from here under auto-pan instead of
                                      chasing a screen anchor; re-projected per frame for the
                                      render box; only read while marquee_on */
+  int helper_on;                  /* alignment helper lines + snap (inc-5 #8); calloc OFF */
+  struct { int vert[8], nvert, horz[8], nhorz; } helper;  /* active guide WORLD lines, refilled
+                                     per single-node drag motion, cleared on release;
+                                     transient — never journaled/persisted */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
   flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */
@@ -1235,6 +1248,10 @@ flow_rect flow_bounds_of(flow_t *f, const int *ids, int n) {
 }
 void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void *user) {
   f->validator_fn = fn; f->validator_user = user;   /* NULL fn = allow all (default) */
+}
+void flow_set_helper_lines(flow_t *f, int on) {
+  f->helper_on = on;
+  if (!on) { f->helper.nvert = 0; f->helper.nhorz = 0; }  /* OFF drops any live guides */
 }
 void flow_set_node_hidden(flow_t *f, int id, int hidden) {
   flow_node *n = flow_get_node(f, id);

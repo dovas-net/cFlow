@@ -297,6 +297,22 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     }
   }
 
+  /* alignment guide rules (inc-5 #8): full-row/column dashed lines for the active
+     helper guides — after the marquee box (mutually exclusive states anyway),
+     before minimap/overlay/statusbar so app panels still win. World lines are
+     projected per frame; dashed glyphs (╎ 0x254E / ╌ 0x254C) read as transient
+     and stay distinct from the marquee ▒, handles ◉, and the SOLID grid │/─. */
+  for (int g = 0; g < f->helper.nvert; g++) {
+    int sx = flow_to_screen(f, (flow_pt){ f->helper.vert[g], 0 }).x;
+    if (sx < 0 || sx >= cols) continue;
+    for (int y = 0; y < rows; y++) flow_cellbuf_put(&cb, sx, y, 0x254E, FLOW_FG, FLOW_BG, 0);
+  }
+  for (int g = 0; g < f->helper.nhorz; g++) {
+    int sy = flow_to_screen(f, (flow_pt){ 0, f->helper.horz[g] }).y;
+    if (sy < 0 || sy >= rows) continue;
+    for (int x = 0; x < cols; x++) flow_cellbuf_put(&cb, x, sy, 0x254C, FLOW_FG, FLOW_BG, 0);
+  }
+
   if (f->minimap.enabled) flow__minimap(f, &cb);
   if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 
