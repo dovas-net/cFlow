@@ -1351,11 +1351,14 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (seq[0] == 'c') { flow_cut_selection(f); return 1; }           /*   c cut  */
   if (seq[0] == 'p') { flow_paste(f); return 1; }                   /*   p paste */
   if (seq[0] == 'd') { flow_duplicate_selection(f); return 1; }     /*   d duplicate */
+  if (seq[0] == 'q') { f->running = 0; return 1; }                  /* quit (inc-6 #3): behind hook+registry — a modal
+                                                                       can veto, an app can rebind; consumed even when
+                                                                       running is already 0 (flow_run's liveness bit) */
   if (seq[0] == '\r') {                                             /* Enter: select the focused node (REPLACE — focus is a single cursor) */
     if (f->focus_node != -1) flow_select_node(f, f->focus_node, 0);
     return 1;                                                       /* consumed even with no focus (no-op) */
   }
-  /* (3) unhandled: q, bare arrows, anything else */
+  /* (3) unhandled: bare arrows, anything else */
   return 0;
 }
 /* ----- handles & connections ----- */

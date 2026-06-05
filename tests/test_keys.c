@@ -26,6 +26,16 @@ static void key_on_cend(flow_t *f, int eid, int src, int tgt, void *u) {
 static void x_custom(flow_t *f, void *u) { (void)f; (void)u; g_xcustom++; }
 static int g_ctrlup = 0;
 static void ctrl_up(flow_t *f, void *u) { (void)f; (void)u; g_ctrlup++; }
+/* quit routing (inc-6 #3): hook that consumes 'q' (mirrors the palette's
+   printable-append path) + a custom registry binding for 'q' */
+static int g_qhook_hits = 0;
+static int qhook_consume_q(flow_t *f, const char *seq, int len, void *user) {
+  (void)f; (void)user;
+  if (len >= 1 && seq[0] == 'q') { g_qhook_hits++; return 1; }
+  return 0;
+}
+static int g_qcustom = 0;
+static void q_custom(flow_t *f, void *u) { (void)f; (void)u; g_qcustom++; }
 
 static void mark_overlay(flow_t *f, flow_surface *s, void *u) {
   (void)f; (void)u; flow_put(s, 0, 0, '@', FLOW_FG, FLOW_BG, 0);
@@ -134,15 +144,60 @@ int main(void) {
     flow_free(f);
   }
 
-  /* ---- dispatch isolation: arrows still pan, 'q' not consumed ---- */
+  /* ---- dispatch isolation: arrows still pan, 'q' now quits via dispatch ---- */
   {
     flow_t *f = flow_new(80, 24); flow_register_defaults(f);
     flow_viewport v0 = flow_view_get(f);
     flow_feed(f, "\x1b[A", 3);  /* up */
     flow_viewport v1 = flow_view_get(f);
     ASSERT(v1.oy != v0.oy, "bare arrow still pans (not swallowed by dispatch)");
-    ASSERT_INT(flow_dispatch_key(f, "q", 1), 0, "'q' not consumed by dispatch");
+    ASSERT_INT(flow_dispatch_key(f, "q", 1), 1, "'q' consumed by dispatch (quit built-in)");
     ASSERT_INT(flow_dispatch_key(f, "\x1b[A", 3), 0, "bare arrow not consumed by dispatch");
+    flow_free(f);
+  }
+
+  /* ---- quit routing (inc-6 #3): 'q' is a dispatch built-in behind hook + registry.
+     Every running-assert sets f->running = 1 FIRST (poke per discipline pin):
+     flow_run is the only writer that arms it, so without the explicit arm a feed-'q'
+     leaves running 0 pre- AND post-patch and the assert is a false green. ---- */
+  {
+    /* dispatch-'q' clears running */
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    f->running = 1;
+    flow_feed(f, "q", 1);
+    ASSERT_INT(f->running, 0, "feed 'q' cleared running via dispatch built-in");
+    flow_free(f);
+  }
+  {
+    /* hook-swallowed 'q' does NOT quit (modal veto) — regression lock, green
+       pre-patch too: the raw scan lived in flow_run, unreachable from flow_feed */
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    g_qhook_hits = 0;
+    flow_set_key_hook(f, qhook_consume_q, NULL);
+    f->running = 1;
+    flow_feed(f, "q", 1);
+    ASSERT_INT(g_qhook_hits, 1, "hook ran and consumed 'q'");
+    ASSERT_INT(f->running, 1, "hook-swallowed 'q' does NOT quit (modal veto)");
+    flow_free(f);
+  }
+  {
+    /* registry-bound 'q' overrides quit (app override; mirrors the 'x' override
+       above) — regression lock, green pre-patch for the same reason */
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    g_qcustom = 0;
+    flow_bind_key(f, "q", q_custom, NULL);
+    f->running = 1;
+    flow_feed(f, "q", 1);
+    ASSERT_INT(g_qcustom, 1, "custom 'q' binding ran");
+    ASSERT_INT(f->running, 1, "registry overrides the quit built-in");
+    flow_free(f);
+  }
+  {
+    /* embedder semantics: consumed even when running is already 0 (calloc default);
+       0 stays 0 — running is flow_run's private liveness bit, not a public channel */
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    ASSERT_INT(flow_dispatch_key(f, "q", 1), 1, "'q' consumed even with running already 0");
+    ASSERT_INT(f->running, 0, "running unchanged: 0 stays 0, no flip");
     flow_free(f);
   }
 

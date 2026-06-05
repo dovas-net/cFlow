@@ -19,7 +19,7 @@ void flow_feed(flow_t *f, const char *b, int n) {
       flow_mouse_event ev; int used = flow_parse_mouse(b + i, n - i, &ev);
       if (used > 0) { flow_handle_mouse(f, &ev); i += used; continue; }
     }
-    int dk = flow_dispatch_key(f, b + i, n - i);   /* registry/built-in keys (NOT bare arrows, NOT 'q') */
+    int dk = flow_dispatch_key(f, b + i, n - i);   /* registry/built-in keys (NOT bare arrows) */
     if (dk > 0) { i += dk; continue; }
     if (b[i] == '\x1b' && i + 2 < n && b[i+1] == '[') {
       switch (b[i+2]) {                          /* arrow-key pan */
@@ -79,7 +79,6 @@ void flow_run(flow_t *f) {
   while (f->running) {
     int n = (int)read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) break;
-    for (int i = 0; i < n; i++) if (buf[i] == 'q') f->running = 0;
     flow_feed(f, buf, n);
     flow_present(f);
   }

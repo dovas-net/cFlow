@@ -1522,11 +1522,14 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (seq[0] == 'c') { flow_cut_selection(f); return 1; }           /*   c cut  */
   if (seq[0] == 'p') { flow_paste(f); return 1; }                   /*   p paste */
   if (seq[0] == 'd') { flow_duplicate_selection(f); return 1; }     /*   d duplicate */
+  if (seq[0] == 'q') { f->running = 0; return 1; }                  /* quit (inc-6 #3): behind hook+registry — a modal
+                                                                       can veto, an app can rebind; consumed even when
+                                                                       running is already 0 (flow_run's liveness bit) */
   if (seq[0] == '\r') {                                             /* Enter: select the focused node (REPLACE — focus is a single cursor) */
     if (f->focus_node != -1) flow_select_node(f, f->focus_node, 0);
     return 1;                                                       /* consumed even with no focus (no-op) */
   }
-  /* (3) unhandled: q, bare arrows, anything else */
+  /* (3) unhandled: bare arrows, anything else */
   return 0;
 }
 /* ----- handles & connections ----- */
@@ -3739,7 +3742,7 @@ void flow_feed(flow_t *f, const char *b, int n) {
       flow_mouse_event ev; int used = flow_parse_mouse(b + i, n - i, &ev);
       if (used > 0) { flow_handle_mouse(f, &ev); i += used; continue; }
     }
-    int dk = flow_dispatch_key(f, b + i, n - i);   /* registry/built-in keys (NOT bare arrows, NOT 'q') */
+    int dk = flow_dispatch_key(f, b + i, n - i);   /* registry/built-in keys (NOT bare arrows) */
     if (dk > 0) { i += dk; continue; }
     if (b[i] == '\x1b' && i + 2 < n && b[i+1] == '[') {
       switch (b[i+2]) {                          /* arrow-key pan */
@@ -3799,7 +3802,6 @@ void flow_run(flow_t *f) {
   while (f->running) {
     int n = (int)read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) break;
-    for (int i = 0; i < n; i++) if (buf[i] == 'q') f->running = 0;
     flow_feed(f, buf, n);
     flow_present(f);
   }
