@@ -235,6 +235,27 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     }
   }
 
+  /* focus ring (inc-5 #5): reverse-video re-stamp of the focused node's drawn border.
+     A POST-PASS because focus is an id on struct flow, not a node flag — the body
+     renderer (ctx.flags = n->flags) is blind to it. AFTER the handle markers, which
+     flow_cellbuf_put with a fresh attr: OR-ing REVERSE here keeps a focused+selected
+     node's ◉ cells inside the ring (no gaps at handle anchors). Footprint-aware: at
+     LOD collapse the ring reverses the single marker cell. Glyphs/colors untouched. */
+  if (f->focus_node != -1) {
+    flow_node *fn = flow_get_node(f, f->focus_node);
+    if (fn && flow__node_visible(f, fn)) {
+      flow_rect r = flow__node_footprint(f, fn, flow__lod_for(f, f->view.zoom));
+      for (int y = r.y; y < r.y + r.h; y++) {
+        if (y < 0 || y >= rows) continue;
+        for (int x = r.x; x < r.x + r.w; x++) {
+          if (x < 0 || x >= cols) continue;
+          if (y != r.y && y != r.y + r.h - 1 && x != r.x && x != r.x + r.w - 1) continue; /* border only */
+          cb.cells[y * cb.w + x].attr |= FLOW_REVERSE;
+        }
+      }
+    }
+  }
+
   /* in-flight connection preview: dashed rubber-band from the source handle to the
      free cursor cell. No arrowhead — overwrite the router's last cell with a dash. */
   if (f->conn_active) {
@@ -290,7 +311,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
        that prefix means deliberately regenerating the golden. */
     flow_text(&s, 0, 0, f->space_held
               ? " PAN  drag:pan  Space/Esc:exit "
-              : " n:add  x:del  f:fit  ?:help  q:quit  SPC:pan  u:undo  ^r:redo ",
+              : " n:add  x:del  f:fit  ?:help  q:quit  SPC:pan  u:undo  ^r:redo  Tab:focus ",
               FLOW_FG, FLOW_BG, FLOW_REVERSE);
   }
 }

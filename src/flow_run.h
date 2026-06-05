@@ -27,6 +27,9 @@ void flow_feed(flow_t *f, const char *b, int n) {
         case 'B': flow_pan(f, 0, -1); i += 3; continue;   /* down  */
         case 'C': flow_pan(f, -1, 0); i += 3; continue;   /* right */
         case 'D': flow_pan(f,  1, 0); i += 3; continue;   /* left  */
+        case 'Z': flow_focus_prev(f); i += 3; continue;   /* Shift-Tab: focus backward (inc-5 #5);
+                                                             previously fell to default and the
+                                                             trailing i++ mis-parsed "[Z" */
         default: break;
       }
     }
@@ -35,16 +38,17 @@ void flow_feed(flow_t *f, const char *b, int n) {
     if (b[i] == '+' || b[i] == '=') { flow_zoom_in (f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
     if (b[i] == '-' || b[i] == '_') { flow_zoom_out(f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
     /* lone ESC (not the start of a CSI) cancels an in-flight connection, exits
-       space-pan mode (the Esc alias for the sticky Space toggle), and clears the
-       selection (sig-gated: on_selection_change fires only if the set was non-empty).
-       All three actions are idempotent no-ops on already-blank state. Real
-       mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above.
+       space-pan mode (the Esc alias for the sticky Space toggle), clears the
+       selection (sig-gated: on_selection_change fires only if the set was non-empty),
+       and clears keyboard focus (inc-5 #5). All four actions are idempotent no-ops
+       on already-blank state. Real mouse/arrow/Delete sequences all have
+       b[i+1]=='[' and are consumed above.
        ACCEPTED trade-off: a CSI split by a read() boundary exactly after its ESC
        byte reads as a lone ESC here (terminals write sequences atomically, so this
        is theoretical); the alternative — requiring a next byte to prove loneness —
        would break the COMMON case, a tapped ESC arriving as a 1-byte read. A real
        fix is an ESC-timeout state machine; out of scope for v1. */
-    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); f->space_held = 0; flow_clear_selection(f); i++; continue; }
+    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); f->space_held = 0; flow_clear_selection(f); f->focus_node = -1; i++; continue; }
     i++;
   }
 }

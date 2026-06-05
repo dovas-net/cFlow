@@ -261,6 +261,20 @@ const flow_handle *flow_node_handle_at(flow_t *f, int node, int idx); /* idx-th 
 int flow_hit_handle(flow_t *f, flow_pt screen, int *out_node);   /* handle index + node id at screen cell, or -1; only on hovered/selected/connecting nodes */
 void flow_set_hover(flow_t *f, int node);                         /* set FLOW_HOVERED on node (clears others); -1 clears all */
 int flow_hovered_node(flow_t *f);                                 /* first FLOW_HOVERED node, or -1 */
+
+/* keyboard focus (inc-5 #5) — the keyboard analog of hover: one focused node at a
+   time, stored as an id (sentinel -1), never a flag. Tab/Shift-Tab built-ins cycle
+   VISIBLE nodes in insertion order (wrapping; hidden skipped — focus is VIEW-level
+   like render/hit/marquee); Enter selects the focused node (replace); lone-ESC
+   clears focus. Focus is invalidated to -1 when the focused node is deleted or
+   hidden. Focusing a FULLY-offscreen node re-centres the viewport on it via
+   flow_set_center (autoPanOnNodeFocus); partially/fully visible nodes never jump.
+   Transient view/interaction state: not journaled, not persisted. */
+int  flow_focused_node(flow_t *f);          /* current focused node id, or -1 */
+void flow_set_focus(flow_t *f, int id);     /* focus a specific node (id<0 or hidden/absent => clears to -1); frames if offscreen */
+void flow_focus_next(flow_t *f);            /* Tab: next VISIBLE node in insertion order, wrapping; frames if offscreen */
+void flow_focus_prev(flow_t *f);            /* Shift-Tab: previous VISIBLE node, wrapping; frames if offscreen */
+void flow_set_center(flow_t *f, int wx, int wy, float zoom); /* declared here for the focus framing call; defined in flow_view.h (same TU — the flow_undo precedent) */
 int flow_begin_connection(flow_t *f, int node, const char *handle); /* enter connecting from source handle; 0 ok, -1 if not a valid source */
 int flow_update_connection(flow_t *f, flow_pt screen);           /* move free end to screen cell; returns hovered candidate target node id or -1 */
 int flow_end_connection(flow_t *f, int node, const char *handle);/* complete: add edge src->node; returns new edge id or -1; clears connecting */
@@ -426,6 +440,8 @@ struct flow {
   flow_viewport view; float zmin, zmax; int cols, rows; flow_cell *front; int running;
   flow_rect node_extent, translate_extent;  /* optional world-space clamps (spec §6.1/§6.2); zero rect = disabled (calloc default) */
   int drag_node, dragging_pan; flow_pt drag_grab, last_mouse;  /* mouse interaction state */
+  int focus_node;                 /* keyboard focus id, -1 none (inc-5 #5): an id, NOT a flag;
+                                     invalidated on delete/hide of the focused node */
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
@@ -624,7 +640,7 @@ flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)calloc(1, sizeof *f);
   f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
-  f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1;
+  f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1; f->focus_node = -1;
   f->reconnect_edge = -1; f->last_click_node = -1; f->last_click_edge = -1;
   f->autopan_margin = 3; f->autopan_speed = 2;
   f->journal.limit = 128; f->journal.txn_base = -1;
@@ -1142,6 +1158,9 @@ void flow_remove_node(flow_t *f, int id) {
     f->nnodes--;
     break;                                                    /* break (not return) so cleanup below runs */
   }
+  if (f->focus_node == id) f->focus_node = -1;                /* focus is an id, not a flag: explicit
+                                                                 invalidation (descendants clear in their
+                                                                 own recursive calls above) */
   f->cb_suppress--; f->journal.suppress--;
   if (top) flow__notify_selection(f, sig);                    /* selection shrank if a selected node vanished */
 }
@@ -1222,6 +1241,8 @@ void flow_set_node_hidden(flow_t *f, int id, int hidden) {
   if (hidden) {
     unsigned long sig = flow__sel_sig(f);
     n->flags |= FLOW_HIDDEN;
+    if (f->focus_node == id) f->focus_node = -1;    /* hide unfocuses: same no-invisible-cursor
+                                                       rule as the deselect below (inc-5 #5) */
     if (n->flags & FLOW_SELECTED) {                 /* hide deselects: no invisible selection
                                                        (Delete would silently remove it) */
       n->flags &= ~(unsigned)FLOW_SELECTED;
@@ -1276,6 +1297,11 @@ int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (seq[0] == ' ') { f->space_held = !f->space_held; return 1; }  /* space-pan: sticky toggle (no key-up in a TTY) */
   if (seq[0] == 'u') { flow_undo(f); return 1; }                    /* declared above, defined in flow_undo.h (same TU) */
   if (seq[0] == '\x12') { flow_redo(f); return 1; }                 /* Ctrl-r: single byte, longest-match safe */
+  if (seq[0] == '\t') { flow_focus_next(f); return 1; }             /* Tab: focus traversal (inc-5 #5); Shift-Tab is CSI \x1b[Z, handled in flow_feed */
+  if (seq[0] == '\r') {                                             /* Enter: select the focused node (REPLACE — focus is a single cursor) */
+    if (f->focus_node != -1) flow_select_node(f, f->focus_node, 0);
+    return 1;                                                       /* consumed even with no focus (no-op) */
+  }
   /* (3) unhandled: q, bare arrows, anything else */
   return 0;
 }
@@ -1344,6 +1370,57 @@ void flow_set_hover(flow_t *f, int node) {
 int flow_hovered_node(flow_t *f) {
   for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].flags & FLOW_HOVERED) return f->nodes[i].id;
   return -1;
+}
+/* ---- keyboard focus (inc-5 #5) ---- */
+int flow_focused_node(flow_t *f) { return f->focus_node; }
+/* fully offscreen iff the node's drawn screen footprint (LOD-aware, same projection
+   as render/hit) misses [0,cols) x [0,rows) entirely — "looks offscreen" and "is
+   framed" can never disagree. Partially-visible nodes are NOT offscreen (no jump). */
+static int flow__focus_offscreen(flow_t *f, const flow_node *n) {
+  flow_rect r = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom));
+  return r.x + r.w <= 0 || r.y + r.h <= 0 || r.x >= f->cols || r.y >= f->rows;
+}
+/* shared tail: commit the focus, then frame iff the node is fully offscreen
+   (autoPanOnNodeFocus). flow_set_center keeps the current zoom (-1) and routes
+   through flow__view_set (clamp-first, on_viewport_change iff changed). */
+static void flow__focus_commit(flow_t *f, int id) {
+  f->focus_node = id;
+  flow_node *n = flow_get_node(f, id);
+  if (n && flow__focus_offscreen(f, n)) {
+    flow_rect wr = flow_node_rect_abs(f, n);
+    flow_set_center(f, wr.x + wr.w / 2, wr.y + wr.h / 2, -1.0f);
+  }
+}
+void flow_set_focus(flow_t *f, int id) {
+  flow_node *n = id >= 0 ? flow_get_node(f, id) : NULL;
+  if (!n || !flow__node_visible(f, n)) { f->focus_node = -1; return; }  /* hidden/absent: clear */
+  flow__focus_commit(f, id);
+}
+static int flow__focus_index(flow_t *f) {
+  if (f->focus_node < 0) return -1;
+  for (int i = 0; i < f->nnodes; i++) if (f->nodes[i].id == f->focus_node) return i;
+  return -1;                                   /* stale id: treated as no focus */
+}
+void flow_focus_next(flow_t *f) {
+  int n = f->nnodes;
+  if (n == 0) { f->focus_node = -1; return; }
+  int start = flow__focus_index(f);            /* -1 => first probe is index 0 */
+  for (int s = 1; s <= n; s++) {
+    flow_node *nd = &f->nodes[(start + s + n) % n];
+    if (flow__node_visible(f, nd)) { flow__focus_commit(f, nd->id); return; }
+  }
+  f->focus_node = -1;                          /* zero visible nodes */
+}
+void flow_focus_prev(flow_t *f) {
+  int n = f->nnodes;
+  if (n == 0) { f->focus_node = -1; return; }
+  int start = flow__focus_index(f);
+  if (start < 0) start = 0;                    /* from none: first probe is the LAST node */
+  for (int s = 1; s <= n; s++) {
+    flow_node *nd = &f->nodes[(start - s + 2 * n) % n];
+    if (flow__node_visible(f, nd)) { flow__focus_commit(f, nd->id); return; }
+  }
+  f->focus_node = -1;
 }
 /* find a node's handle by id; returns it or NULL */
 static const flow_handle *flow__handle_named(flow_t *f, int node, const char *id) {
@@ -2423,6 +2500,27 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     }
   }
 
+  /* focus ring (inc-5 #5): reverse-video re-stamp of the focused node's drawn border.
+     A POST-PASS because focus is an id on struct flow, not a node flag — the body
+     renderer (ctx.flags = n->flags) is blind to it. AFTER the handle markers, which
+     flow_cellbuf_put with a fresh attr: OR-ing REVERSE here keeps a focused+selected
+     node's ◉ cells inside the ring (no gaps at handle anchors). Footprint-aware: at
+     LOD collapse the ring reverses the single marker cell. Glyphs/colors untouched. */
+  if (f->focus_node != -1) {
+    flow_node *fn = flow_get_node(f, f->focus_node);
+    if (fn && flow__node_visible(f, fn)) {
+      flow_rect r = flow__node_footprint(f, fn, flow__lod_for(f, f->view.zoom));
+      for (int y = r.y; y < r.y + r.h; y++) {
+        if (y < 0 || y >= rows) continue;
+        for (int x = r.x; x < r.x + r.w; x++) {
+          if (x < 0 || x >= cols) continue;
+          if (y != r.y && y != r.y + r.h - 1 && x != r.x && x != r.x + r.w - 1) continue; /* border only */
+          cb.cells[y * cb.w + x].attr |= FLOW_REVERSE;
+        }
+      }
+    }
+  }
+
   /* in-flight connection preview: dashed rubber-band from the source handle to the
      free cursor cell. No arrowhead — overwrite the router's last cell with a dash. */
   if (f->conn_active) {
@@ -2478,7 +2576,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
        that prefix means deliberately regenerating the golden. */
     flow_text(&s, 0, 0, f->space_held
               ? " PAN  drag:pan  Space/Esc:exit "
-              : " n:add  x:del  f:fit  ?:help  q:quit  SPC:pan  u:undo  ^r:redo ",
+              : " n:add  x:del  f:fit  ?:help  q:quit  SPC:pan  u:undo  ^r:redo  Tab:focus ",
               FLOW_FG, FLOW_BG, FLOW_REVERSE);
   }
 }
@@ -3283,6 +3381,9 @@ void flow_feed(flow_t *f, const char *b, int n) {
         case 'B': flow_pan(f, 0, -1); i += 3; continue;   /* down  */
         case 'C': flow_pan(f, -1, 0); i += 3; continue;   /* right */
         case 'D': flow_pan(f,  1, 0); i += 3; continue;   /* left  */
+        case 'Z': flow_focus_prev(f); i += 3; continue;   /* Shift-Tab: focus backward (inc-5 #5);
+                                                             previously fell to default and the
+                                                             trailing i++ mis-parsed "[Z" */
         default: break;
       }
     }
@@ -3291,16 +3392,17 @@ void flow_feed(flow_t *f, const char *b, int n) {
     if (b[i] == '+' || b[i] == '=') { flow_zoom_in (f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
     if (b[i] == '-' || b[i] == '_') { flow_zoom_out(f, (flow_pt){ f->cols / 2, f->rows / 2 }); i++; continue; }
     /* lone ESC (not the start of a CSI) cancels an in-flight connection, exits
-       space-pan mode (the Esc alias for the sticky Space toggle), and clears the
-       selection (sig-gated: on_selection_change fires only if the set was non-empty).
-       All three actions are idempotent no-ops on already-blank state. Real
-       mouse/arrow/Delete sequences all have b[i+1]=='[' and are consumed above.
+       space-pan mode (the Esc alias for the sticky Space toggle), clears the
+       selection (sig-gated: on_selection_change fires only if the set was non-empty),
+       and clears keyboard focus (inc-5 #5). All four actions are idempotent no-ops
+       on already-blank state. Real mouse/arrow/Delete sequences all have
+       b[i+1]=='[' and are consumed above.
        ACCEPTED trade-off: a CSI split by a read() boundary exactly after its ESC
        byte reads as a lone ESC here (terminals write sequences atomically, so this
        is theoretical); the alternative — requiring a next byte to prove loneness —
        would break the COMMON case, a tapped ESC arriving as a 1-byte read. A real
        fix is an ESC-timeout state machine; out of scope for v1. */
-    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); f->space_held = 0; flow_clear_selection(f); i++; continue; }
+    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); f->space_held = 0; flow_clear_selection(f); f->focus_node = -1; i++; continue; }
     i++;
   }
 }
