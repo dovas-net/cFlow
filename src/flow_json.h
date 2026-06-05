@@ -300,6 +300,14 @@ int flow_load(flow_t *f, const char *path) {
      recording suppressed — a load is not an edit, so it journals NOTHING. */
   flow__graph_reset(f);
   f->journal.suppress++;
+  /* suspend the connection validator across the rebuild (inc-5 #2): the edges loop
+     re-adds every saved edge THROUGH flow_add_edge, and a validator left set on the
+     engine must not re-gate (silently drop) edges that already exist in the file.
+     Save/NULL/restore mirrors the journal.suppress bracket above; every early
+     return in this function is BEFORE this point, so the restore is always reached. */
+  flow_connection_validator saved_vfn = f->validator_fn;
+  void *saved_vuser = f->validator_user;
+  f->validator_fn = NULL; f->validator_user = NULL;
 
   /* viewport (floats; keep zmin/zmax limits from the live engine) */
   flow_json_rd vp;
@@ -387,6 +395,7 @@ int flow_load(flow_t *f, const char *path) {
   f->nextid  = maxnid + 1;                           /* post-load adds don't collide */
   f->nexteid = maxeid + 1;
 
+  f->validator_fn = saved_vfn; f->validator_user = saved_vuser;
   f->journal.suppress--;
   free(buf);
   return 0;

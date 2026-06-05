@@ -122,9 +122,10 @@ void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *han
    missing nodes, duplicates) so expensive user logic only sees structurally valid
    proposals. Rejection is silent: graph unchanged, nothing journaled, no callbacks.
    handles are "" if none. NULL fn (the default) = allow all, zero overhead.
-   TRANSIENT, like the extents: flow_load rebuilds edges THROUGH flow_add_edge, so a
-   validator left set across a load re-gates every loaded edge and can silently drop
-   them — clear it before (or set it after) flow_load. Not persisted. */
+   TRANSIENT, like the extents — not persisted. flow_load SUSPENDS the validator
+   across its edge rebuild (save/NULL/restore, inc-5 #2) so a saved graph loads
+   faithfully regardless of validator state; the validator remains installed and
+   gates add/reconnect calls again the moment flow_load returns. */
 typedef int (*flow_connection_validator)(flow_t *f, int source, int target,
                                          const char *source_handle, const char *target_handle,
                                          void *user);

@@ -51,6 +51,13 @@ static void free_devices_and_flow(flow_t *f) {
   flow_free(f);
 }
 
+/* reject-all connection validator (inc-5 #2: validator suspension during load) */
+static int vj_reject_all(flow_t *f, int source, int target,
+                         const char *sh, const char *th, void *user) {
+  (void)f; (void)source; (void)target; (void)sh; (void)th; (void)user;
+  return 0;
+}
+
 /* slurp a file into a fresh malloc'd NUL-terminated buffer (caller frees) */
 static char *slurp(const char *path) {
   FILE *fp = fopen(path, "rb");
@@ -411,6 +418,68 @@ int main(void) {
     ASSERT_INT(flow_hit_node(g, (flow_pt){12, 6}), a, "  reloaded node is hittable (visible)");
     flow_free(f); flow_free(g);
     remove(P_HID);
+  }
+
+  /* ---- validator suspension during flow_load (inc-5 #2): a validator left set
+     on the engine must NOT re-gate (and silently drop) saved edges during the
+     rebuild, yet must be active again the moment flow_load returns — and early
+     returns (failed open / parse-invalid) must leave it untouched. ---- */
+  {
+    const char *P_VGARB = "/tmp/flow_json_vgarb.json";
+    /* graph a: 3 nodes, 2 edges; save */
+    flow_t *a = flow_new(80, 24); flow_register_defaults(a);
+    int n1 = flow_add_node(a, "default", (flow_pt){0, 0},  (void*)"n1");
+    int n2 = flow_add_node(a, "default", (flow_pt){20, 0}, (void*)"n2");
+    int n3 = flow_add_node(a, "default", (flow_pt){40, 0}, (void*)"n3");
+    int e12 = flow_add_edge(a, n1, n2, "", "");
+    flow_add_edge(a, n2, n3, "", "");
+    ASSERT_INT(flow_save(a, P_A), 0, "validator-suspend: save 2-edge graph ok");
+
+    /* fresh b with a reject-all validator; prove it is active and REACHES the gate
+       (distinct existing nodes, non-self, non-dup => only the validator can reject) */
+    flow_t *b = flow_new(80, 24); flow_register_defaults(b);
+    int bn1 = flow_add_node(b, "default", (flow_pt){0, 0}, (void*)"b1");
+    int bn2 = flow_add_node(b, "default", (flow_pt){9, 9}, (void*)"b2");
+    flow_set_connection_validator(b, vj_reject_all, NULL);
+    ASSERT_INT(flow_add_edge(b, bn1, bn2, "", ""), -1, "reject-all gates a pre-load add");
+    ASSERT_INT(flow_edge_count(b), 0, "  no edge added pre-load");
+
+    /* load: the suspension must let ALL saved edges through */
+    ASSERT_INT(flow_load(b, P_A), 0, "load with live validator ok");
+    ASSERT_INT(flow_edge_count(b), 2, "ALL saved edges loaded despite reject-all (suspended)");
+    ASSERT_INT(flow_node_count(b), 3, "nodes unaffected");
+
+    /* validator restored: a structurally-valid post-load add still rejects */
+    ASSERT_INT(flow_add_edge(b, n1, n3, "", ""), -1, "validator active again after load");
+    ASSERT_INT(flow_edge_count(b), 2, "  edge count unchanged");
+
+    /* reconnect gate unaffected by the load suspension: prospective n3->n2 is
+       non-self, non-dup => reaches the validator, which rejects; source unchanged */
+    flow_reconnect_edge(b, e12, n3, "", 0);
+    flow_edge *re12 = flow_get_edge(b, e12);
+    ASSERT(re12 != NULL && re12->source == n1, "reconnect still gated post-load (source unchanged)");
+
+    /* early return, failed open: validator never saved-then-lost */
+    flow_t *c = flow_new(80, 24); flow_register_defaults(c);
+    int cn1 = flow_add_node(c, "default", (flow_pt){0, 0}, (void*)"c1");
+    int cn2 = flow_add_node(c, "default", (flow_pt){9, 9}, (void*)"c2");
+    flow_set_connection_validator(c, vj_reject_all, NULL);
+    ASSERT_INT(flow_load(c, "/tmp/does_not_exist_flow_xyz.json"), -1, "failed-open load returns -1");
+    ASSERT_INT(flow_add_edge(c, cn1, cn2, "", ""), -1, "  validator intact after failed open");
+
+    /* early return, parse failure: structure-invalid is rejected BEFORE the bracket */
+    FILE *gf = fopen(P_VGARB, "wb");
+    ASSERT(gf != NULL, "garbage file writable");
+    if (gf) { fputs("{\"version\":1,\"viewport\":{\"ox\":12.5,\"oy\":-3", gf); fclose(gf); }
+    flow_t *d = flow_new(80, 24); flow_register_defaults(d);
+    int dn1 = flow_add_node(d, "default", (flow_pt){0, 0}, (void*)"d1");
+    int dn2 = flow_add_node(d, "default", (flow_pt){9, 9}, (void*)"d2");
+    flow_set_connection_validator(d, vj_reject_all, NULL);
+    ASSERT_INT(flow_load(d, P_VGARB), -1, "parse-invalid load returns -1");
+    ASSERT_INT(flow_add_edge(d, dn1, dn2, "", ""), -1, "  validator intact after parse failure");
+
+    flow_free(a); flow_free(b); flow_free(c); flow_free(d);
+    remove(P_VGARB);
   }
 
   /* clean up temp files */

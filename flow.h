@@ -293,9 +293,10 @@ void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *han
    missing nodes, duplicates) so expensive user logic only sees structurally valid
    proposals. Rejection is silent: graph unchanged, nothing journaled, no callbacks.
    handles are "" if none. NULL fn (the default) = allow all, zero overhead.
-   TRANSIENT, like the extents: flow_load rebuilds edges THROUGH flow_add_edge, so a
-   validator left set across a load re-gates every loaded edge and can silently drop
-   them — clear it before (or set it after) flow_load. Not persisted. */
+   TRANSIENT, like the extents — not persisted. flow_load SUSPENDS the validator
+   across its edge rebuild (save/NULL/restore, inc-5 #2) so a saved graph loads
+   faithfully regardless of validator state; the validator remains installed and
+   gates add/reconnect calls again the moment flow_load returns. */
 typedef int (*flow_connection_validator)(flow_t *f, int source, int target,
                                          const char *source_handle, const char *target_handle,
                                          void *user);
@@ -2742,6 +2743,14 @@ int flow_load(flow_t *f, const char *path) {
      recording suppressed — a load is not an edit, so it journals NOTHING. */
   flow__graph_reset(f);
   f->journal.suppress++;
+  /* suspend the connection validator across the rebuild (inc-5 #2): the edges loop
+     re-adds every saved edge THROUGH flow_add_edge, and a validator left set on the
+     engine must not re-gate (silently drop) edges that already exist in the file.
+     Save/NULL/restore mirrors the journal.suppress bracket above; every early
+     return in this function is BEFORE this point, so the restore is always reached. */
+  flow_connection_validator saved_vfn = f->validator_fn;
+  void *saved_vuser = f->validator_user;
+  f->validator_fn = NULL; f->validator_user = NULL;
 
   /* viewport (floats; keep zmin/zmax limits from the live engine) */
   flow_json_rd vp;
@@ -2829,6 +2838,7 @@ int flow_load(flow_t *f, const char *path) {
   f->nextid  = maxnid + 1;                           /* post-load adds don't collide */
   f->nexteid = maxeid + 1;
 
+  f->validator_fn = saved_vfn; f->validator_user = saved_vuser;
   f->journal.suppress--;
   free(buf);
   return 0;
