@@ -4,6 +4,12 @@ void flow_feed(flow_t *f, const char *bytes, int n);
 void flow_run(flow_t *f);
 
 #ifdef FLOW_IMPLEMENTATION
+#include <poll.h>
+#include <errno.h>
+void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
+unsigned flow_ticks(flow_t *f) { return f->tick; }
+void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */
+int flow__frames_armed(flow_t *f) { (void)f; return 0; }       /* v1: nothing armed → poll blocks forever (idle = today's behavior). #5/#8 add `||` clauses here. */
 void flow_present(flow_t *f) {
   flow_cell *back = (flow_cell*)calloc((size_t)f->cols * f->rows, sizeof(flow_cell));
   flow_render(f, back, f->cols, f->rows);
@@ -77,9 +83,15 @@ void flow_run(flow_t *f) {
   flow_present(f);
   char buf[64];
   while (f->running) {
+    int timeout = flow__frames_armed(f) ? f->tick_ms : -1;   /* -1 = block forever (idle ⇒ zero wakeups) */
+    struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+    int pr = poll(&pfd, 1, timeout);
+    if (pr < 0) { if (errno == EINTR) continue; break; }      /* benign signal (SIGWINCH/SIGCONT): retry, don't quit */
+    if (pr == 0) { flow_tick(f); flow_present(f); continue; } /* TIMEOUT: advance clock, redraw */
+    /* READABLE */
     int n = (int)read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) break;
-    flow_feed(f, buf, n);
+    flow_feed(f, buf, n);                                     /* q-quit is a dispatch built-in (#3); NO raw scan here */
     flow_present(f);
   }
   flow_term_restore();

@@ -375,6 +375,13 @@ void flow_set_node_hidden(flow_t *f, int id, int hidden);
 void flow_set_edge_hidden(flow_t *f, int id, int hidden);
 void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-pan band (defaults 3/2): margin = band width in cells, speed = step per motion event; negatives clamp to 0, margin 0 disables */
 
+/* inc-6 #4 redraw-clock — deterministic animation clock (declarations; impls live in
+   src/flow_run.h). The tick is the ONLY animation clock; wall-clock NEVER enters model/render. */
+void     flow_tick(flow_t *f);                /* advance clock: ++f->tick. No IO, no render, no time(). The testable seam. */
+unsigned flow_ticks(flow_t *f);               /* read current tick (consumers derive dash phase = tick % period). */
+void     flow_set_tick_ms(flow_t *f, int ms); /* redraw interval (ms) when frames are armed; default 100; <=0 clamps to 1 (never 0 → never busy-spin). */
+int      flow__frames_armed(flow_t *f);       /* present-decision predicate; v1 returns 0 (nothing armed). #5 ORs "any FLOW_ANIMATED edge"; #8 ORs "object drag in flight". */
+
 /* ---- undo/redo: capped inverse-op command journal (spec §11) ----
    Every recorded mutator (add/remove node+edge, move, reconnect, set-label, reparent)
    pushes an inverse-op record keyed on STABLE ids; flow_undo/flow_redo replay inverses.
@@ -488,6 +495,7 @@ struct flow {
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
   int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
   int autopan_margin, autopan_speed;                           /* auto-pan near edge during object drags (node/connect/reconnect): band width (cells) + step per motion event; defaults 3/2 in flow_new */
+  unsigned tick; int tick_ms;                                  /* inc-6 #4 redraw-clock: deterministic animation clock + redraw interval (ms). Transient — never journaled, never saved. `tick` is calloc-zero (correct start frame); `tick_ms` defaulted to 100 in flow_new (0 would mean "armed but poll-forever"). */
   int last_click_node;                                         /* dblclick: id of the previous node-body click (-1 = none/consumed); a 2nd click on the same id is a double-click */
   int last_click_edge;                                         /* edge dblclick pair state, mirroring last_click_node; broken by any OTHER click (node/pane/different edge) and on flow_load */
   int cb_suppress;                                             /* >0 suppresses nested observer fires (on_nodes_delete / on_selection_change) from recursive/aggregate mutators (remove_node cascade, delete_selection, select_in_rect's internal clear) */
@@ -699,6 +707,7 @@ flow_t *flow_new(int cols, int rows) {
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1; f->focus_node = -1;
   f->reconnect_edge = -1; f->last_click_node = -1; f->last_click_edge = -1;
   f->autopan_margin = 3; f->autopan_speed = 2;
+  f->tick_ms = 100;                                            /* inc-6 #4: 10 Hz redraw when armed; tick stays calloc-zero */
   f->journal.limit = 128; f->journal.txn_base = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
@@ -3727,6 +3736,12 @@ void flow_feed(flow_t *f, const char *bytes, int n);
 void flow_run(flow_t *f);
 
 #ifdef FLOW_IMPLEMENTATION
+#include <poll.h>
+#include <errno.h>
+void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
+unsigned flow_ticks(flow_t *f) { return f->tick; }
+void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */
+int flow__frames_armed(flow_t *f) { (void)f; return 0; }       /* v1: nothing armed → poll blocks forever (idle = today's behavior). #5/#8 add `||` clauses here. */
 void flow_present(flow_t *f) {
   flow_cell *back = (flow_cell*)calloc((size_t)f->cols * f->rows, sizeof(flow_cell));
   flow_render(f, back, f->cols, f->rows);
@@ -3800,9 +3815,15 @@ void flow_run(flow_t *f) {
   flow_present(f);
   char buf[64];
   while (f->running) {
+    int timeout = flow__frames_armed(f) ? f->tick_ms : -1;   /* -1 = block forever (idle ⇒ zero wakeups) */
+    struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+    int pr = poll(&pfd, 1, timeout);
+    if (pr < 0) { if (errno == EINTR) continue; break; }      /* benign signal (SIGWINCH/SIGCONT): retry, don't quit */
+    if (pr == 0) { flow_tick(f); flow_present(f); continue; } /* TIMEOUT: advance clock, redraw */
+    /* READABLE */
     int n = (int)read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) break;
-    flow_feed(f, buf, n);
+    flow_feed(f, buf, n);                                     /* q-quit is a dispatch built-in (#3); NO raw scan here */
     flow_present(f);
   }
   flow_term_restore();
