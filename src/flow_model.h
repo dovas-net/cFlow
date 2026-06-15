@@ -1,5 +1,5 @@
 /* ===== model: engine, nodes, edges, vtable types, transform, bounds, hit-test ===== */
-enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 8u, FLOW_EXTENT_PARENT = 16u };
+enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 8u, FLOW_EXTENT_PARENT = 16u, FLOW_ANIMATED = 32u };
 /* FLOW_EXTENT_PARENT gates flow_move_node's child-inside-parent clamp; set/clear
    directly on n->flags. FLOW_HIDDEN is a VIEW-level skip (render, hit, marquee,
    bounds, minimap, handles) set via flow_set_node_hidden / flow_set_edge_hidden;
@@ -202,6 +202,7 @@ void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom h
    persisted in v1: flags reload as 0, so saved-hidden elements come back visible. */
 void flow_set_node_hidden(flow_t *f, int id, int hidden);
 void flow_set_edge_hidden(flow_t *f, int id, int hidden);
+void flow_set_edge_animated(flow_t *f, int id, int on); /* inc-6 #5: marching-ants opt-in — on!=0 sets FLOW_ANIMATED on the edge, on==0 clears; no-op on unknown id. Arms #4's redraw clock via the recomputed flow__frames_armed predicate. NOT journaled, NOT persisted (flags are ephemeral; re-arm after flow_load). */
 void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-pan band (defaults 3/2): margin = band width in cells, speed = step per motion event; negatives clamp to 0, margin 0 disables */
 
 /* inc-6 #4 redraw-clock — deterministic animation clock (declarations; impls live in
@@ -1313,6 +1314,12 @@ void flow_set_edge_hidden(flow_t *f, int id, int hidden) {
   } else {
     e->flags &= ~(unsigned)FLOW_HIDDEN;
   }
+}
+void flow_set_edge_animated(flow_t *f, int id, int on) {        /* inc-6 #5: mirrors flow_set_edge_hidden, minus the deselect side-effect (animation is orthogonal to selection/visibility). Stores NO armed state — #4's flow__frames_armed scans the flag each poll. */
+  flow_edge *e = flow_get_edge(f, id);
+  if (!e) return;
+  if (on) e->flags |= FLOW_ANIMATED;
+  else    e->flags &= ~(unsigned)FLOW_ANIMATED;
 }
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_set_autopan(flow_t *f, int margin, int speed) {

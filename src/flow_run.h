@@ -9,7 +9,11 @@ void flow_run(flow_t *f);
 void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
 unsigned flow_ticks(flow_t *f) { return f->tick; }
 void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */
-int flow__frames_armed(flow_t *f) { (void)f; return 0; }       /* v1: nothing armed → poll blocks forever (idle = today's behavior). #5/#8 add `||` clauses here. */
+int flow__frames_armed(flow_t *f) {                            /* recomputed each poll: scans current model state, no stored arm flag. #8 adds the in-flight-drag clause. */
+  for (int i = 0; i < flow_edge_count(f); i++)                  /* inc-6 #5: any FLOW_ANIMATED edge needs frames (early-out on first) */
+    if (flow_edges(f)[i].flags & FLOW_ANIMATED) return 1;
+  return 0;
+}
 void flow_present(flow_t *f) {
   flow_cell *back = (flow_cell*)calloc((size_t)f->cols * f->rows, sizeof(flow_cell));
   flow_render(f, back, f->cols, f->rows);

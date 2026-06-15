@@ -6,6 +6,11 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows);
    serializes only BOLD/REVERSE attrs but always the ;38;5;<fg> color path, so a
    DIM-attr grid would look full-intensity on a real terminal. 8 = bright black. */
 #define FLOW_BG_GRID_FG 8
+/* inc-6 #5 marching-ants: an animated edge's path cell is LIT when (cell_index + tick) %
+   FLOW_DASH_PERIOD == 0 (every-other cell — the cadence the connection preview proves reads
+   at TUI granularity); off-phase cells are skipped. Named so a longer ant pattern is a one-
+   constant change. */
+#define FLOW_DASH_PERIOD 2u
 static void flow__background(flow_t *f, flow_cellbuf *cb) {
   int gap = f->bg.gap;  /* setter guarantees gap >= 1 when variant != NONE */
   for (int sy = 0; sy < cb->h; sy++) for (int sx = 0; sx < cb->w; sx++) {
@@ -176,6 +181,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
 
   /* edges first (drawn under nodes). Endpoints/facings via the shared helper so the
      hit-test (flow_hit_edge) and this draw can never drift apart. */
+  int elod = flow__lod_for(f, f->view.zoom);   /* inc-6 #5: marching-ants are suppressed at LOD 1 (per-cell dash is illegible zoomed out) */
   for (int i = 0; i < flow_edge_count(f); i++) {
     flow_edge *e = &flow_edges(f)[i];
     if (!flow__edge_visible(f, e)) continue;   /* hidden edge OR hidden endpoint (cascade) */
@@ -186,8 +192,12 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     flow_route rt = {0};
     et->route(ss, sp, ts, tp, &rt);
     uint8_t attr = (e->flags & FLOW_SELECTED) ? FLOW_BOLD : 0;  /* selected edge: bold path */
-    for (int c = 0; c < rt.count; c++)
+    int animated = (e->flags & FLOW_ANIMATED) && elod == 0;     /* inc-6 #5: tick-phased dash at LOD 0 only */
+    for (int c = 0; c < rt.count; c++) {
+      if (animated && c < rt.count - 1 && ((c + f->tick) % FLOW_DASH_PERIOD) != 0)
+        continue;                                               /* off-phase path cell: skip (gap shows backdrop). Arrowhead c==count-1 is exempt → always solid. */
       flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, attr);
+    }
     if (e->label) {                                            /* label on top of the path at the router anchor (screen coords), clipped */
       const char *u = e->label; int gx = rt.label_anchor.x;
       while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n;

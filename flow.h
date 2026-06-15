@@ -170,7 +170,7 @@ char *flow_diff_emit(const flow_cell *front, const flow_cell *back, int cols, in
 #endif
 /* ===================== src/flow_model.h ===================== */
 /* ===== model: engine, nodes, edges, vtable types, transform, bounds, hit-test ===== */
-enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 8u, FLOW_EXTENT_PARENT = 16u };
+enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 8u, FLOW_EXTENT_PARENT = 16u, FLOW_ANIMATED = 32u };
 /* FLOW_EXTENT_PARENT gates flow_move_node's child-inside-parent clamp; set/clear
    directly on n->flags. FLOW_HIDDEN is a VIEW-level skip (render, hit, marquee,
    bounds, minimap, handles) set via flow_set_node_hidden / flow_set_edge_hidden;
@@ -373,6 +373,7 @@ void flow_set_statusbar(flow_t *f, int enabled); /* toggle the built-in bottom h
    persisted in v1: flags reload as 0, so saved-hidden elements come back visible. */
 void flow_set_node_hidden(flow_t *f, int id, int hidden);
 void flow_set_edge_hidden(flow_t *f, int id, int hidden);
+void flow_set_edge_animated(flow_t *f, int id, int on); /* inc-6 #5: marching-ants opt-in — on!=0 sets FLOW_ANIMATED on the edge, on==0 clears; no-op on unknown id. Arms #4's redraw clock via the recomputed flow__frames_armed predicate. NOT journaled, NOT persisted (flags are ephemeral; re-arm after flow_load). */
 void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-pan band (defaults 3/2): margin = band width in cells, speed = step per motion event; negatives clamp to 0, margin 0 disables */
 
 /* inc-6 #4 redraw-clock — deterministic animation clock (declarations; impls live in
@@ -1485,6 +1486,12 @@ void flow_set_edge_hidden(flow_t *f, int id, int hidden) {
     e->flags &= ~(unsigned)FLOW_HIDDEN;
   }
 }
+void flow_set_edge_animated(flow_t *f, int id, int on) {        /* inc-6 #5: mirrors flow_set_edge_hidden, minus the deselect side-effect (animation is orthogonal to selection/visibility). Stores NO armed state — #4's flow__frames_armed scans the flag each poll. */
+  flow_edge *e = flow_get_edge(f, id);
+  if (!e) return;
+  if (on) e->flags |= FLOW_ANIMATED;
+  else    e->flags &= ~(unsigned)FLOW_ANIMATED;
+}
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_set_autopan(flow_t *f, int margin, int speed) {
   f->autopan_margin = margin < 0 ? 0 : margin;   /* 0 = no band = disabled */
@@ -2540,6 +2547,11 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows);
    serializes only BOLD/REVERSE attrs but always the ;38;5;<fg> color path, so a
    DIM-attr grid would look full-intensity on a real terminal. 8 = bright black. */
 #define FLOW_BG_GRID_FG 8
+/* inc-6 #5 marching-ants: an animated edge's path cell is LIT when (cell_index + tick) %
+   FLOW_DASH_PERIOD == 0 (every-other cell — the cadence the connection preview proves reads
+   at TUI granularity); off-phase cells are skipped. Named so a longer ant pattern is a one-
+   constant change. */
+#define FLOW_DASH_PERIOD 2u
 static void flow__background(flow_t *f, flow_cellbuf *cb) {
   int gap = f->bg.gap;  /* setter guarantees gap >= 1 when variant != NONE */
   for (int sy = 0; sy < cb->h; sy++) for (int sx = 0; sx < cb->w; sx++) {
@@ -2710,6 +2722,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
 
   /* edges first (drawn under nodes). Endpoints/facings via the shared helper so the
      hit-test (flow_hit_edge) and this draw can never drift apart. */
+  int elod = flow__lod_for(f, f->view.zoom);   /* inc-6 #5: marching-ants are suppressed at LOD 1 (per-cell dash is illegible zoomed out) */
   for (int i = 0; i < flow_edge_count(f); i++) {
     flow_edge *e = &flow_edges(f)[i];
     if (!flow__edge_visible(f, e)) continue;   /* hidden edge OR hidden endpoint (cascade) */
@@ -2720,8 +2733,12 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     flow_route rt = {0};
     et->route(ss, sp, ts, tp, &rt);
     uint8_t attr = (e->flags & FLOW_SELECTED) ? FLOW_BOLD : 0;  /* selected edge: bold path */
-    for (int c = 0; c < rt.count; c++)
+    int animated = (e->flags & FLOW_ANIMATED) && elod == 0;     /* inc-6 #5: tick-phased dash at LOD 0 only */
+    for (int c = 0; c < rt.count; c++) {
+      if (animated && c < rt.count - 1 && ((c + f->tick) % FLOW_DASH_PERIOD) != 0)
+        continue;                                               /* off-phase path cell: skip (gap shows backdrop). Arrowhead c==count-1 is exempt → always solid. */
       flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, attr);
+    }
     if (e->label) {                                            /* label on top of the path at the router anchor (screen coords), clipped */
       const char *u = e->label; int gx = rt.label_anchor.x;
       while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n;
@@ -3741,7 +3758,11 @@ void flow_run(flow_t *f);
 void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
 unsigned flow_ticks(flow_t *f) { return f->tick; }
 void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */
-int flow__frames_armed(flow_t *f) { (void)f; return 0; }       /* v1: nothing armed → poll blocks forever (idle = today's behavior). #5/#8 add `||` clauses here. */
+int flow__frames_armed(flow_t *f) {                            /* recomputed each poll: scans current model state, no stored arm flag. #8 adds the in-flight-drag clause. */
+  for (int i = 0; i < flow_edge_count(f); i++)                  /* inc-6 #5: any FLOW_ANIMATED edge needs frames (early-out on first) */
+    if (flow_edges(f)[i].flags & FLOW_ANIMATED) return 1;
+  return 0;
+}
 void flow_present(flow_t *f) {
   flow_cell *back = (flow_cell*)calloc((size_t)f->cols * f->rows, sizeof(flow_cell));
   flow_render(f, back, f->cols, f->rows);

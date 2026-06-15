@@ -54,13 +54,18 @@ int main(void) {
     flow_free(f);
   }
 
-  /* 4. Arming predicate is OFF in v1 (idle = block forever). #5/#8 update this assertion. */
+  /* 4. Arming predicate: OFF with a plain edge; ON once an edge is FLOW_ANIMATED
+     (inc-6 #5 added the first || clause). #8 later ORs in the in-flight-drag clause. */
   {
     flow_t *f = flow_new(30, 8); flow_register_defaults(f);
     int a = flow_add_node(f, "default", (flow_pt){0, 0}, (void*)"A");
     int b = flow_add_node(f, "default", (flow_pt){15, 4}, (void*)"B");
-    flow_add_edge(f, a, b, "", "");
-    ASSERT_INT(flow__frames_armed(f), 0, "nothing armed in v1 (zero idle wakeups)");
+    int e = flow_add_edge(f, a, b, "", "");
+    ASSERT_INT(flow__frames_armed(f), 0, "plain edge arms nothing (zero idle wakeups)");
+    flow_set_edge_animated(f, e, 1);
+    ASSERT_INT(flow__frames_armed(f), 1, "an animated edge arms the redraw clock");
+    flow_set_edge_animated(f, e, 0);
+    ASSERT_INT(flow__frames_armed(f), 0, "clearing animation disarms");
     flow_free(f);
   }
 
