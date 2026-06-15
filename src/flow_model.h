@@ -336,6 +336,7 @@ struct flow {
                                      invalidated on delete/hide of the focused node */
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
+  flow_pt last_cursor;                                         /* inc-6 #8: last autopan-eligible motion cell (screen); the tick replays a synthetic motion here. Transient — calloc-zero, never saved/journaled. */
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
   int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
   int autopan_margin, autopan_speed;                           /* auto-pan near edge during object drags (node/connect/reconnect): band width (cells) + step per motion event; defaults 3/2 in flow_new */

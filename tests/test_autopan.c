@@ -227,5 +227,151 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ==== inc-6 #8 tick-autopan: ticked auto-pan during object drags ==== */
+
+  /* 1. Ticks keep panning AND keep the node glued to the stationary cursor (the discriminator). */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_pt o0 = org(f);
+    press_at(f, 11, 6);                          /* grab offset (1,1) */
+    move_to(f, 79, 12);                          /* right band */
+    ASSERT_INT(org(f).x, o0.x - 2, "motion pans -2 (landed single-event result)");
+    ASSERT_INT(flow_get_node(f, a)->pos.x, 79 - org(f).x - 1, "node at post-pan world (glued)");
+    ASSERT(flow__frames_armed(f) != 0, "node drag in flight arms the clock");
+    flow__autopan_tick(f);                        /* NO new mouse event: tick replays the in-band motion */
+    ASSERT_INT(org(f).x, o0.x - 4, "tick pans another -2");
+    ASSERT_INT(flow_get_node(f, a)->pos.x, 79 - org(f).x - 1, "node follows the cursor (still glued)");
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, o0.x - 6, "second tick pans another -2");
+    ASSERT_INT(flow_get_node(f, a)->pos.x, 79 - org(f).x - 1, "node still glued after two ticks");
+    release_at(f, 79, 12);
+    flow_free(f);
+  }
+
+  /* 2. Disarm on release — no runaway pan. */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    press_at(f, 11, 6); move_to(f, 79, 12);
+    ASSERT(flow__frames_armed(f) != 0, "drag in band: armed");
+    release_at(f, 79, 12);
+    ASSERT_INT(flow__frames_armed(f), 0, "release: predicate no longer fires");
+    flow_pt before = org(f);
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, before.x, "tick after release does not pan");
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, before.x, "still stable after a second post-release tick");
+    flow_free(f);
+  }
+
+  /* 3. No pan when the cursor returns to the interior, but the drag stays armed. */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    press_at(f, 11, 6); move_to(f, 79, 12);      /* into the band */
+    move_to(f, 40, 12);                           /* back to interior */
+    ASSERT(flow__frames_armed(f) != 0, "drag still live: clock stays armed");
+    flow_pt before = org(f);
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, before.x, "interior cursor: tick does not pan (flow__autopan no-ops)");
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, before.x, "still no runaway at the interior");
+    release_at(f, 40, 12);
+    flow_free(f);
+  }
+
+  /* 4. Marquee ticks pan and the gesture stays live. */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_pt o0 = org(f);
+    press_shift_at(f, 50, 10); move_shift_to(f, 79, 22);   /* bottom-right bands */
+    ASSERT_INT(org(f).x, o0.x - 2, "marquee motion pans x -2");
+    ASSERT_INT(org(f).y, o0.y - 2, "marquee motion pans y -2");
+    ASSERT(flow__frames_armed(f) != 0, "marquee in flight: armed");
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, o0.x - 4, "marquee tick pans x another -2");
+    ASSERT_INT(org(f).y, o0.y - 4, "marquee tick pans y another -2");
+    ASSERT_INT(f->marquee_on, 1, "marquee gesture still live");
+    release_at(f, 79, 22);
+    flow_free(f);
+  }
+
+  /* 5. Connection-drag ticks pan; conn_end stays pinned at the cursor. */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    flow_set_hover(f, a);
+    flow_pt o0 = org(f);
+    press_at(f, 14, 6);                           /* right handle */
+    move_to(f, 79, 12);
+    ASSERT_INT(f->conn_active, 1, "connection in flight");
+    ASSERT_INT(org(f).x, o0.x - 2, "connection motion pans -2");
+    ASSERT(flow__frames_armed(f) != 0, "connection arms the clock");
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, o0.x - 4, "connection tick pans another -2");
+    ASSERT_INT(f->conn_active, 1, "connection still in flight");
+    ASSERT_INT(f->conn_end.x, 79, "conn_end stays pinned at the cursor (screen coords)");
+    release_at(f, 79, 12);
+    flow_free(f);
+  }
+
+  /* 6. Reconnect-drag ticks pan-only (no object follows, endpoint unchanged until release). */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 12}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_pt tp; flow_edge_endpoint_screen(f, flow_get_edge(f, e), 1, &tp);
+    flow_pt o0 = org(f);
+    press_at(f, tp.x, tp.y);                      /* arm reconnect at the target endpoint */
+    move_to(f, 79, 12);
+    ASSERT_INT(f->reconnect_edge, e, "reconnect drag armed");
+    ASSERT_INT(org(f).x, o0.x - 2, "reconnect motion pans -2");
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, o0.x - 4, "reconnect tick pans another -2");
+    ASSERT_INT(f->reconnect_edge, e, "reconnect still armed");
+    ASSERT_INT(flow_get_edge(f, e)->target, b, "target unchanged until release (pan-only)");
+    release_at(f, 79, 12);
+    flow_free(f);
+  }
+
+  /* 7. Pane-pan and space-pan never arm — the tick is a no-op for them. */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    press_at(f, 50, 10); move_to(f, 79, 10);      /* pane-pan into the band */
+    ASSERT_INT(flow__frames_armed(f), 0, "pane-pan never arms");
+    flow_pt before = org(f);
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, before.x, "tick is a no-op during a pane-pan");
+    release_at(f, 79, 10);
+
+    feed(f, " ");                                 /* space-pan mode ON */
+    press_at(f, 50, 10); move_to(f, 79, 10);
+    ASSERT_INT(flow__frames_armed(f), 0, "space-pan never arms");
+    before = org(f);
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, before.x, "tick is a no-op during a space-pan");
+    release_at(f, 79, 10);
+    flow_free(f);
+  }
+
+  /* 8. Degenerate axis stays dead under ticks (the tick reads flow__autopan's guard, not a copy). */
+  {
+    flow_t *f = flow_new(24, 6); flow_register_defaults(f);   /* rows 6: 2*3 >= 6 -> y-axis dead */
+    flow_add_node(f, "default", (flow_pt){5, 2}, (void*)"A");
+    flow_pt o0 = org(f);
+    press_at(f, 6, 3); move_to(f, 1, 1);          /* x in LEFT band (alive), y in dead top band */
+    ASSERT_INT(org(f).x, o0.x + 2, "x-axis pans on the small buffer");
+    ASSERT_INT(org(f).y, o0.y,     "y-axis dead (bands overlap)");
+    flow__autopan_tick(f);
+    ASSERT_INT(org(f).x, o0.x + 4, "tick keeps panning the live x-axis");
+    ASSERT_INT(org(f).y, o0.y,     "y-axis NEVER moves under ticks");
+    release_at(f, 1, 1);
+    flow_free(f);
+  }
+
   return flowtest_report("test_autopan");
 }

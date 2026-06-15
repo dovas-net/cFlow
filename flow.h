@@ -507,6 +507,7 @@ struct flow {
                                      invalidated on delete/hide of the focused node */
   flow_pt drag_last_world;                                     /* multi-drag: last drag pos in world coords (per-motion delta) */
   int mouse_down, down_node, moved; flow_pt down_pos;          /* press/click tracking */
+  flow_pt last_cursor;                                         /* inc-6 #8: last autopan-eligible motion cell (screen); the tick replays a synthetic motion here. Transient — calloc-zero, never saved/journaled. */
   int down_modsel;                                             /* press was a SHIFT/CTRL modifier-select on a node (suppress release replace) */
   int space_held;                                              /* space-pan: sticky toggle (terminal model A) — a press forces drag-to-pan over node OR pane */
   int autopan_margin, autopan_speed;                           /* auto-pan near edge during object drags (node/connect/reconnect): band width (cells) + step per motion event; defaults 3/2 in flow_new */
@@ -3405,9 +3406,10 @@ static int flow__resolve_connection_at(flow_t *f, flow_pt scr) {
    while an OBJECT drag (node / connection / reconnect / marquee) has the cursor
    within autopan_margin cells of a buffer edge, panning toward that edge so
    off-screen targets scroll into reach. A terminal delivers no events for a
-   stationary cursor, so this only advances while the mouse keeps moving (the
-   run-loop-ticked model is a documented follow-up). Callers gate: pane-pan drags
-   never auto-pan (marquee drags auto-pan as of increment 4).
+   stationary cursor; inc-6 #8's flow__autopan_tick replays a synthetic motion at the
+   held cursor on each redraw tick, so a stationary in-band cursor keeps panning (the
+   run-loop-ticked model — the follow-up this comment used to defer). Callers gate:
+   pane-pan drags never auto-pan (marquee drags auto-pan as of increment 4).
    An axis whose margin bands would overlap (2*margin >= extent) is skipped — defense
    for tiny buffers, where "near the edge" loses meaning. */
 static void flow__autopan(flow_t *f, flow_pt scr) {
@@ -3523,12 +3525,14 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
          view (conn_end is screen coords — the pan never moves it). Deliberately fires
          on connectOnClick HOVER too (conn_active with no button down): the connection
          is in flight either way, and the edge is what makes off-screen targets reachable. */
+      f->last_cursor = scr;                       /* inc-6 #8: record for the tick replay */
       flow__autopan(f, scr);
       flow_update_connection(f, scr);
       return;
     }
     if (f->reconnect_edge != -1) {                /* reconnect drag: just track movement, no pan/drag */
       if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
+      f->last_cursor = scr;                       /* inc-6 #8 */
       flow__autopan(f, scr);                      /* nothing to re-place: release hit-tests at the cursor */
       return;
     }
@@ -3558,6 +3562,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
          scrolls the view only the cursor corner moves in world — the rect GROWS from
          the press point (world-stable selection, inc-5 #3) instead of chasing the
          screen anchor. */
+      f->last_cursor = scr;                       /* inc-6 #8 */
       flow__autopan(f, scr);
       f->marquee_cur = scr;
       flow_pt wa = f->marquee_anchor_world, wc = flow_to_world(f, scr);
@@ -3568,6 +3573,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     } else if (f->drag_node != -1) {
       /* pan FIRST, then place at the post-pan world(cursor): the node stays under the
          cursor as the view scrolls (place-then-pan would make it visually drift). */
+      f->last_cursor = scr;                       /* inc-6 #8 */
       flow__autopan(f, scr);
       if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift the set by per-motion world delta */
         flow_pt w = flow_to_world(f, scr);
@@ -3762,6 +3768,25 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     f->helper.nvert = 0; f->helper.nhorz = 0;    /* guides never outlive the gesture (inc-5 #8) */
   }
 }
+/* inc-6 #8: an autopan-eligible object drag/connection is in flight (the four MOTION
+   branches that call flow__autopan). Drives BOTH the tick gate below and #4's
+   flow__frames_armed clause; pane-pan/space-pan (dragging_pan) are excluded by omission,
+   so "pane-pan never auto-pans" carries straight through to the tick. Self-disarms the
+   instant the gesture ends (release clears these fields) — no stored arm flag to reset. */
+static int flow__drag_in_flight(flow_t *f) {
+  return f->conn_active || f->reconnect_edge != -1 || f->marquee_on || f->drag_node != -1;
+}
+/* inc-6 #8: the per-tick autopan continuation, driven by #4's poll loop (and called
+   directly by tests). Replays a synthetic FLOW_MOUSE_MOTION at the last in-band cursor
+   through flow_handle_mouse, so flow__autopan runs UNCHANGED in its pan-first slot and the
+   branch's own re-placement keeps the dragged object glued. The synthetic event reads only
+   type/x/y (mods is never consulted on the motion path). Gated on flow__drag_in_flight so a
+   direct call during a pane-pan (or with only an animated edge armed) is a no-op. */
+static void flow__autopan_tick(flow_t *f) {
+  if (!flow__drag_in_flight(f)) return;
+  flow_mouse_event ev = { FLOW_MOUSE_MOTION, 0, f->last_cursor.x, f->last_cursor.y, 0u };
+  flow_handle_mouse(f, &ev);
+}
 #endif
 /* ===================== src/flow_term.h ===================== */
 /* ===== terminal: raw mode, alt-screen, size (impl-only POSIX deps) ===== */
@@ -3803,7 +3828,8 @@ void flow_run(flow_t *f);
 void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
 unsigned flow_ticks(flow_t *f) { return f->tick; }
 void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */
-int flow__frames_armed(flow_t *f) {                            /* recomputed each poll: scans current model state, no stored arm flag. #8 adds the in-flight-drag clause. */
+int flow__frames_armed(flow_t *f) {                            /* recomputed each poll: scans current model state, no stored arm flag. */
+  if (flow__drag_in_flight(f)) return 1;                        /* inc-6 #8: an object drag/connection is in flight (ticked autopan) */
   for (int i = 0; i < flow_edge_count(f); i++)                  /* inc-6 #5: any FLOW_ANIMATED edge needs frames (early-out on first) */
     if (flow_edges(f)[i].flags & FLOW_ANIMATED) return 1;
   return 0;
@@ -3885,7 +3911,7 @@ void flow_run(flow_t *f) {
     struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
     int pr = poll(&pfd, 1, timeout);
     if (pr < 0) { if (errno == EINTR) continue; break; }      /* benign signal (SIGWINCH/SIGCONT): retry, don't quit */
-    if (pr == 0) { flow_tick(f); flow_present(f); continue; } /* TIMEOUT: advance clock, redraw */
+    if (pr == 0) { flow_tick(f); flow__autopan_tick(f); flow_present(f); continue; } /* TIMEOUT: advance clock, replay in-flight autopan (#8), redraw */
     /* READABLE */
     int n = (int)read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) break;

@@ -9,7 +9,8 @@ void flow_run(flow_t *f);
 void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
 unsigned flow_ticks(flow_t *f) { return f->tick; }
 void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */
-int flow__frames_armed(flow_t *f) {                            /* recomputed each poll: scans current model state, no stored arm flag. #8 adds the in-flight-drag clause. */
+int flow__frames_armed(flow_t *f) {                            /* recomputed each poll: scans current model state, no stored arm flag. */
+  if (flow__drag_in_flight(f)) return 1;                        /* inc-6 #8: an object drag/connection is in flight (ticked autopan) */
   for (int i = 0; i < flow_edge_count(f); i++)                  /* inc-6 #5: any FLOW_ANIMATED edge needs frames (early-out on first) */
     if (flow_edges(f)[i].flags & FLOW_ANIMATED) return 1;
   return 0;
@@ -91,7 +92,7 @@ void flow_run(flow_t *f) {
     struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
     int pr = poll(&pfd, 1, timeout);
     if (pr < 0) { if (errno == EINTR) continue; break; }      /* benign signal (SIGWINCH/SIGCONT): retry, don't quit */
-    if (pr == 0) { flow_tick(f); flow_present(f); continue; } /* TIMEOUT: advance clock, redraw */
+    if (pr == 0) { flow_tick(f); flow__autopan_tick(f); flow_present(f); continue; } /* TIMEOUT: advance clock, replay in-flight autopan (#8), redraw */
     /* READABLE */
     int n = (int)read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) break;
