@@ -30,6 +30,20 @@ static int hook_two(flow_t *f, const char *seq, int len, void *user) {
   return 0;
 }
 
+/* inc-6 #6 palette-style hook + desync canary: consumes (appends) every PRINTABLE
+   byte into g_query and returns 0 for control bytes and CSIs (so a modal drops them).
+   Mirrors demos/flowchart.c's palette: printables build the query, CSIs are unconsumed. */
+static char g_query[64]; static int g_qlen = 0;
+static int hook_pal(flow_t *f, const char *seq, int len, void *user) {
+  (void)f; (void)user;
+  unsigned char c = (unsigned char)seq[0];
+  if (len >= 1 && c >= 0x20 && c < 0x7f) {            /* printable: consume 1, append to query */
+    if (g_qlen < (int)sizeof g_query - 1) g_query[g_qlen++] = (char)c;
+    return 1;
+  }
+  return 0;                                            /* control byte / CSI: unconsumed → modal drops it */
+}
+
 /* a type with NO label accessor (explicit NULL here; the ABI-append zero-init
    contract is separately proven by test_model.c's old 5-field initializer) */
 static void nl_measure(const flow_node *n, int *w, int *h) { (void)n; *w = 3; *h = 1; }
@@ -69,6 +83,73 @@ int main(void) {
     g_bound = 0;
     feed(f, "g");
     ASSERT_INT(g_bound, 1, "cleared hook: binding fires again");
+    flow_free(f);
+  }
+
+  /* ---- inc-6 #6: engine-side modal key capture (flow_set_key_hook_modal) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){5, 5}, (void*)"A");
+    flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");   /* 2nd node so focus-prev would actually move if not dropped */
+    flow_set_key_hook(f, hook_pal, NULL);
+    flow_set_key_hook_modal(f, 1);
+
+    /* 1. Headline: Delete does NOT delete while modal (hook returns 0 for the CSI). */
+    flow_select_node(f, a, 0);
+    ASSERT_INT(flow_selected_count(f), 1, "node selected");
+    feed(f, "\x1b[3~");                                  /* Delete CSI \x1b[3~ */
+    ASSERT_INT(flow_selected_count(f), 1, "modal dropped Delete: selection survives");
+    ASSERT_INT(flow_node_count(f), 2, "modal dropped Delete: nodes survive");
+
+    /* 2. Unconsumed CSI is DROPPED, not fallen-through: bare arrow does not pan. */
+    float ox0 = f->view.ox;
+    feed(f, "\x1b[C");                                   /* right arrow */
+    ASSERT(f->view.ox == ox0, "modal dropped bare arrow: no pan");
+    f->focus_node = a;
+    feed(f, "\x1b[Z");                                   /* Shift-Tab (focus-prev) */
+    ASSERT_INT(f->focus_node, a, "modal dropped Shift-Tab: focus did not move");
+
+    /* 3. Atomic drop: the dropped CSI does NOT desync into the query. */
+    g_qlen = 0; g_query[0] = 0;
+    feed(f, "\x1b[3~");
+    ASSERT_INT(g_qlen, 0, "atomic drop: CSI tail never re-fed as printable");
+
+    /* 6. A consumed sequence is unaffected by modal (printable still consumed). */
+    g_qlen = 0;
+    feed(f, "k");                                        /* printable: hook consumes + appends */
+    ASSERT_INT(g_qlen, 1, "modal does not change the consume path");
+
+    /* 7. (#3 landed) q does not quit while modal — hook consumes q (printable) before the q-quit built-in. */
+    f->running = 1; g_qlen = 0;
+    feed(f, "q");
+    ASSERT_INT(f->running, 1, "q consumed by palette hook — does not quit");
+    flow_free(f);
+  }
+
+  /* 4. Modal-on with a NULL hook is INERT (the footgun gate). */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){5, 5}, (void*)"A");
+    flow_set_key_hook(f, NULL, NULL);
+    flow_set_key_hook_modal(f, 1);
+    flow_select_node(f, a, 0);
+    feed(f, "\x1b[3~");                                  /* Delete */
+    ASSERT_INT(flow_node_count(f), 0, "modal with NULL hook drops nothing: Delete still deletes");
+    flow_free(f);
+  }
+
+  /* 5. Modal OFF is byte-identical to today (explicit 0; calloc default is also 0). */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){5, 5}, (void*)"A");
+    flow_set_key_hook(f, hook_pal, NULL);
+    flow_set_key_hook_modal(f, 0);
+    flow_select_node(f, a, 0);
+    feed(f, "\x1b[3~");                                  /* Delete falls through */
+    ASSERT_INT(flow_node_count(f), 0, "modal off: CSI falls through, Delete deletes (today's behavior)");
+    float ox0 = f->view.ox;
+    feed(f, "\x1b[C");                                   /* right arrow pans */
+    ASSERT(f->view.ox != ox0, "modal off: bare arrow pans (today's behavior)");
     flow_free(f);
   }
 

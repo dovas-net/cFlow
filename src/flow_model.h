@@ -176,6 +176,13 @@ void flow_set_connection_validator(flow_t *f, flow_connection_validator fn, void
    dispatch). NULL = no hook (calloc default), zero overhead. TRANSIENT. */
 typedef int (*flow_key_hook)(flow_t *f, const char *seq, int len, void *user);
 void flow_set_key_hook(flow_t *f, flow_key_hook fn, void *user);
+/* modal key capture (inc-6 #6): when ON, a key sequence the installed hook does NOT
+   consume is DROPPED inside flow_dispatch_key instead of falling through to bindings /
+   built-ins / flow_feed's CSI switch. Engine state, not a hook parameter — the
+   flow_key_hook typedef and the 3-arg flow_set_key_hook are UNCHANGED. INERT unless a
+   hook is installed (modal + NULL hook drops nothing). Default OFF (calloc 0): modal-off
+   input is byte-identical to today. Mouse is exempt (parsed before dispatch). TRANSIENT. */
+void flow_set_key_hook_modal(flow_t *f, int on);
 void flow_set_edge_label(flow_t *f, int edge, const char *label); /* strdup into edge->label, freeing prior; NULL clears */
 
 /* edge hit-test & endpoints — DEFINED in flow_render.h (need the render anchor helpers).
@@ -186,7 +193,7 @@ int  flow_edge_endpoint_screen(flow_t *f, const flow_edge *e, int which, flow_pt
 
 /* keyboard command dispatch: bindings (registry) + built-ins, driven from flow_feed */
 void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user); /* register/override; matched before built-ins, longest seq first. Up to 32 bindings, seq <=7 bytes; over-limit binds are silently ignored. */
-int  flow_dispatch_key(flow_t *f, const char *seq, int n); /* run a binding/built-in for one key seq; returns bytes consumed (>0) or 0 if unhandled */
+int  flow_dispatch_key(flow_t *f, const char *seq, int n); /* run a binding/built-in for one key seq; returns bytes consumed (>0) or 0 if unhandled (inc-6 #6: while key_hook_modal is set with a hook installed, an unconsumed seq returns its dropped length >=1 instead of 0) */
 void flow_delete_selection(flow_t *f);     /* built-in: remove selected node(s) then selected edge */
 int  flow_add_node_center(flow_t *f, const char *type, void *data); /* add at world point under viewport center; returns id */
 void flow_fit_view(flow_t *f, int margin); /* getViewportForBounds: pick zoom+pan so flow_bounds fits with `margin` cells of padding (zoom clamped to [zmin,zmax]); no-op when empty */
@@ -342,6 +349,7 @@ struct flow {
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
   flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */
   flow_key_hook key_hook_fn; void *key_hook_user;                     /* pre-dispatch key gate (inc-5 #10); NULL = none (calloc default) */
+  int key_hook_modal;                                                 /* inc-6 #6: while set AND a hook is installed, an unconsumed seq is DROPPED in flow_dispatch_key (never falls through). Calloc 0 = off. Transient — not journaled, not saved. */
   int reconnect_edge, reconnect_which;                        /* in-flight endpoint-reconnect drag: edge id (-1 idle) + which endpoint (0=source,1=target) */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
@@ -1287,6 +1295,7 @@ void flow_set_helper_lines(flow_t *f, int on) {
 void flow_set_key_hook(flow_t *f, flow_key_hook fn, void *user) {
   f->key_hook_fn = fn; f->key_hook_user = user;   /* NULL fn = no hook (default) */
 }
+void flow_set_key_hook_modal(flow_t *f, int on) { f->key_hook_modal = on ? 1 : 0; }  /* inc-6 #6: does NOT touch key_hook_fn, so the two setters' call order is free */
 void flow_set_node_hidden(flow_t *f, int id, int hidden) {
   flow_node *n = flow_get_node(f, id);
   if (!n) return;
@@ -1335,14 +1344,33 @@ void flow_bind_key(flow_t *f, const char *seq, flow_key_fn fn, void *user) {
   snprintf(f->keys[f->nkeys].seq, sizeof f->keys[0].seq, "%s", seq);
   f->keys[f->nkeys].fn = fn; f->keys[f->nkeys].user = user; f->nkeys++;
 }
+/* inc-6 #6: length of the leading key sequence to DROP when modal. For a CSI (ESC '[' …)
+   return ESC through the first final byte in 0x40..0x7e (@..~, the CSI terminator class —
+   covers arrows A/B/C/D=3, Shift-Tab Z=3, Delete 3~=4, Shift-arrow 1;2A=6), clamped to n;
+   otherwise 1 (a lone control byte or printable). Atomic: dropping only the ESC would
+   re-feed the CSI tail as separate bytes into the query — a worse bug. A CSI split past n
+   clamps to n (the SAME accepted trade-off flow_feed's lone-ESC path documents,
+   src/flow_run.h: terminals write sequences atomically; ESC-timeout is out of scope). */
+static int flow__seq_len(const char *seq, int n) {
+  if (n >= 2 && seq[0] == '\x1b' && seq[1] == '[') {
+    for (int i = 2; i < n; i++)
+      if ((unsigned char)seq[i] >= 0x40 && (unsigned char)seq[i] <= 0x7e) return i + 1;
+    return n;                                   /* no terminator within n: drop what we have */
+  }
+  return 1;
+}
 int flow_dispatch_key(flow_t *f, const char *seq, int n) {
   if (n <= 0) return 0;
   /* (0) pre-dispatch key hook (inc-5 #10): a modal UI sees the bytes before ANY
      binding or built-in; a positive return = bytes consumed, passed verbatim to
-     flow_feed's i-advance. 0 = pass-through to the registry below. */
+     flow_feed's i-advance. 0 = pass-through to the registry below. While key_hook_modal
+     is set and a hook is installed, an UNCONSUMED seq returns its dropped length (>=1)
+     instead of 0 (inc-6 #6) — so it never reaches a binding/built-in or flow_feed's CSI
+     switch. Gated on key_hook_fn: modal + NULL hook drops nothing (footgun guard). */
   if (f->key_hook_fn) {
     int c = f->key_hook_fn(f, seq, n, f->key_hook_user);
     if (c > 0) return c;
+    if (f->key_hook_modal) return flow__seq_len(seq, n);  /* drop the unconsumed sequence atomically */
   }
   /* (1) registry: longest registered seq that fully fits in n and byte-matches. */
   int best = -1; size_t bestlen = 0;
