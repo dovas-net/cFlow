@@ -163,13 +163,13 @@ int main(void) {
     ASSERT_INT(flow_selected_node(f), by_label(f, "save"), "Enter selected the first match");
     ASSERT(f->view.ox != ox0 || f->view.oy != oy0, "Enter framed the match (view moved)");
 
-    /* lone ESC closes without selecting; CSIs pass through (arrows still pan) */
+    /* lone ESC closes without selecting; CSIs are DROPPED while modal (inc-6 #6) */
     int sel_before = flow_selected_node(f);
     flow_feed(f, "/", 1);
     ASSERT_INT(fc_pal.open, 1, "palette reopens");
     float oy1 = f->view.oy;
-    flow_feed(f, "\x1b[A", 3);                         /* arrow CSI: hook passes it */
-    ASSERT(f->view.oy != oy1, "arrow pans while the palette is open (CSI pass-through)");
+    flow_feed(f, "\x1b[A", 3);                         /* arrow CSI: hook returns 0, modal DROPS it */
+    ASSERT(f->view.oy == oy1, "arrow does NOT pan while the palette is open (modal capture)");
     ASSERT_INT(fc_pal.open, 1, "  palette stayed open");
     flow_feed(f, "\x1b", 1);                           /* lone ESC */
     ASSERT_INT(fc_pal.open, 0, "lone ESC closes the palette");

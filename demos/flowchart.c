@@ -110,9 +110,10 @@ static int fc_no_cycles(flow_t *f, int src, int tgt, const char *sh, const char 
 /* '/' command palette (inc-5 #10): a modal search built on the engine's key hook
    + flow_find_nodes + view-frame framing. While open, the hook consumes printable
    chars (incremental query), Backspace, Enter (select + frame the first match),
-   and lone ESC (close). v1 LIMITATION (documented at sign-off): control bytes and
-   CSIs pass through — Tab focus, Shift-arrows, and bare-arrow pan still act while
-   the palette is open (full capture would need byte-count CSI parsing here).
+   and lone ESC (close). inc-6 #6: the palette goes MODAL while open
+   (flow_set_key_hook_modal) — the inc-5 leak is closed, so Delete/Tab/Shift-arrows/
+   bare-arrow pan no longer act on the graph behind the search; any CSI the hook
+   returns 0 for is DROPPED engine-side, not fallen through.
    The palette skips HIDDEN nodes — a view-level UI choice over the model-level
    flow_find_nodes (which includes them by the layering rule). */
 static struct { int open; char q[32]; int qn; } fc_pal;
@@ -133,8 +134,8 @@ static int fc_pal_hook(flow_t *f, const char *seq, int len, void *user) {
   if (!fc_pal.open) return 0;
   unsigned char c = (unsigned char)seq[0];
   if (c == 0x1b) {                                    /* mirror flow_feed's loneness test */
-    if (len >= 2 && seq[1] == '[') return 0;          /* CSI: arrows/Delete pass through */
-    fc_pal.open = 0; return 1;                        /* lone ESC closes */
+    if (len >= 2 && seq[1] == '[') return 0;          /* CSI: hook declines → modal DROPS it (inc-6 #6) */
+    fc_pal.open = 0; flow_set_key_hook_modal(f, 0); return 1;  /* lone ESC closes; leave modal */
   }
   if (c == '\r') {                                    /* Enter: select + frame first match */
     int first;
@@ -143,7 +144,7 @@ static int fc_pal_hook(flow_t *f, const char *seq, int len, void *user) {
       flow_rect r = flow_bounds_of(f, &first, 1);     /* view-frame (inc-5 #4) */
       flow_set_center(f, r.x + r.w / 2, r.y + r.h / 2, -1.0f);
     }
-    fc_pal.open = 0; return 1;
+    fc_pal.open = 0; flow_set_key_hook_modal(f, 0); return 1;  /* Enter selects + closes; leave modal */
   }
   if (c == 0x7f || c == 0x08) {                       /* Backspace */
     if (fc_pal.qn > 0) fc_pal.q[--fc_pal.qn] = 0;
@@ -156,8 +157,9 @@ static int fc_pal_hook(flow_t *f, const char *seq, int len, void *user) {
   return 0;                                           /* other control bytes: pass (v1) */
 }
 static void key_palette(flow_t *f, void *u) {
-  (void)f; (void)u;
+  (void)u;
   fc_pal.open = 1; fc_pal.qn = 0; fc_pal.q[0] = 0;
+  flow_set_key_hook_modal(f, 1);                       /* inc-6 #6: capture ALL input while the palette is open */
 }
 /* helper-lines toggle (inc-5 #8 integration): 'a' flips alignment guides + snap */
 static int fc_align_on = 0;
@@ -185,7 +187,7 @@ static const char *fc_op_name(int op) {
 }
 static void fc_overlay(flow_t *f, flow_surface *s, void *u) {
   (void)u;
-  flow_text(s, 1, 0, "flowchart l:layout g:group G:ungroup h:hide H:show a:align /:find q:quit",
+  flow_text(s, 1, 0, "l:layout g:group G:ungroup h:hide H:show a:align e:anim i:hud /:find q:quit",
             FLOW_FG, FLOW_BG, FLOW_BOLD);
   if (fc_hud) {                                          /* DevTools panes: counts + ViewportLogger + NodeInspector + ChangeLogger */
     flow_viewport v = flow_view_get(f);
@@ -218,6 +220,19 @@ static void fc_overlay(flow_t *f, flow_surface *s, void *u) {
   }
 }
 
+/* inc-6 #5 showcase: 'e' toggles marching-ants animation on EVERY edge. #4's redraw
+   clock arms itself while any edge is animated, so the ants march at 10 Hz; clearing
+   them disarms it (idle graph blocks again). */
+static int fc_anim_on = 0;
+static void key_anim(flow_t *f, void *u) {
+  (void)u;
+  fc_anim_on = !fc_anim_on;
+  for (int i = 0; i < flow_edge_count(f); i++)
+    flow_set_edge_animated(f, flow_edges(f)[i].id, fc_anim_on);
+}
+/* inc-6 #7: 'i' toggles the devtools HUD overlay (default ON). */
+static void key_hud(flow_t *f, void *u) { (void)f; (void)u; fc_hud = !fc_hud; }
+
 /* Build the chart, arrange it, box the branches. Returns the group's node id.
    Layout FIRST, group SECOND: v1 layout ignores cross-partition edges by design,
    so ranking the leaves before boxing them keeps the flowchart shape (a container
@@ -247,6 +262,8 @@ static int flowchart_setup(flow_t *f) {
   flow_bind_key(f, "/", key_palette,  NULL);    /* command palette (inc-5 #10): the hook
                                                    below consumes input only WHILE open */
   flow_bind_key(f, "a", key_align,    NULL);    /* helper-lines toggle (inc-5 #8) */
+  flow_bind_key(f, "e", key_anim,     NULL);    /* inc-6 #5: marching-ants showcase */
+  flow_bind_key(f, "i", key_hud,      NULL);    /* inc-6 #7: devtools HUD toggle */
   flow_set_key_hook(f, fc_pal_hook, NULL);
   flow_callbacks cb = {0};
   cb.on_overlay = fc_overlay;
