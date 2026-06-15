@@ -403,6 +403,13 @@ void flow_undo(flow_t *f);        /* pop the top command, apply its inverse; no-
 void flow_redo(flow_t *f);        /* re-apply the last undone command; no-op if redo stack empty */
 int  flow_can_undo(flow_t *f);
 int  flow_can_redo(flow_t *f);
+/* inc-6 #7 devtools-hud — minimal read-only journal introspection (feeds a ChangeLogger
+   HUD pane). Value-returning, never a pointer into the journal, so flow__cmd/flow__op stay
+   opaque. flow_can_undo(f) == (flow_undo_depth(f) > 0) by construction; these are a strict
+   superset, no deprecation. */
+int  flow_undo_depth(flow_t *f);  /* count of UNDO steps available (== journal depth); 0 when empty/disabled */
+int  flow_redo_depth(flow_t *f);  /* count of REDO steps available */
+int  flow_top_op(flow_t *f);      /* flow_cmd_kind of the LAST op of the top undo command (the most recent recorded mutation); -1 if the undo stack is empty */
 void flow_set_undo_limit(flow_t *f, int max_commands); /* cap history depth (default 128); evicting the
                                      oldest frees its label copies (drops, never frees, node->data ptrs).
                                      0 = disable journaling entirely; negative clamps to 0. */
@@ -1874,6 +1881,16 @@ static void flow__apply_op(flow_t *f, flow__op *op, int redo) {
 }
 int  flow_can_undo(flow_t *f) { return f->journal.n > 0; }
 int  flow_can_redo(flow_t *f) { return f->journal.rn > 0; }
+/* inc-6 #7: read-only journal introspection — pure reads of journal.n/.rn and the top
+   command's last op kind; safe any frame (no applying/txn guards needed — reads never
+   mutate, and an empty/txn-open journal is handled by the n==0 / nops==0 early returns). */
+int  flow_undo_depth(flow_t *f) { return f->journal.n; }
+int  flow_redo_depth(flow_t *f) { return f->journal.rn; }
+int  flow_top_op(flow_t *f) {
+  if (f->journal.n == 0) return -1;
+  struct flow__cmd *c = &f->journal.items[f->journal.n - 1];
+  return c->nops > 0 ? (int)c->ops[c->nops - 1].kind : -1;
+}
 void flow_undo(flow_t *f) {
   if (f->journal.n <= 0 || f->journal.applying || f->journal.txn_depth > 0) return; /* no mid-gesture undo */
   struct flow__cmd c = f->journal.items[--f->journal.n];

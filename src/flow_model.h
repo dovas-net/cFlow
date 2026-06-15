@@ -232,6 +232,13 @@ void flow_undo(flow_t *f);        /* pop the top command, apply its inverse; no-
 void flow_redo(flow_t *f);        /* re-apply the last undone command; no-op if redo stack empty */
 int  flow_can_undo(flow_t *f);
 int  flow_can_redo(flow_t *f);
+/* inc-6 #7 devtools-hud — minimal read-only journal introspection (feeds a ChangeLogger
+   HUD pane). Value-returning, never a pointer into the journal, so flow__cmd/flow__op stay
+   opaque. flow_can_undo(f) == (flow_undo_depth(f) > 0) by construction; these are a strict
+   superset, no deprecation. */
+int  flow_undo_depth(flow_t *f);  /* count of UNDO steps available (== journal depth); 0 when empty/disabled */
+int  flow_redo_depth(flow_t *f);  /* count of REDO steps available */
+int  flow_top_op(flow_t *f);      /* flow_cmd_kind of the LAST op of the top undo command (the most recent recorded mutation); -1 if the undo stack is empty */
 void flow_set_undo_limit(flow_t *f, int max_commands); /* cap history depth (default 128); evicting the
                                      oldest frees its label copies (drops, never frees, node->data ptrs).
                                      0 = disable journaling entirely; negative clamps to 0. */

@@ -166,10 +166,47 @@ static void key_align(flow_t *f, void *u) {
   fc_align_on = !fc_align_on;
   flow_set_helper_lines(f, fc_align_on);
 }
+/* inc-6 #7 devtools HUD: bottom-right panel composed over public read accessors +
+   the new journal-introspection getters. Toggle flag defaults ON; the toggle KEY
+   binding is wired in the final integration pass (the engine surface lands here). */
+static int fc_hud = 1;
+static const char *fc_op_name(int op) {
+  switch (op) {
+    case FLOW_CMD_ADD_NODE:       return "add-node";
+    case FLOW_CMD_REMOVE_NODE:    return "rm-node";
+    case FLOW_CMD_ADD_EDGE:       return "add-edge";
+    case FLOW_CMD_REMOVE_EDGE:    return "rm-edge";
+    case FLOW_CMD_MOVE_NODE:      return "move";
+    case FLOW_CMD_RECONNECT_EDGE: return "reconnect";
+    case FLOW_CMD_SET_LABEL:      return "label";
+    case FLOW_CMD_REPARENT:       return "reparent";
+    default:                      return "-";          /* -1 empty sentinel */
+  }
+}
 static void fc_overlay(flow_t *f, flow_surface *s, void *u) {
   (void)u;
   flow_text(s, 1, 0, "flowchart l:layout g:group G:ungroup h:hide H:show a:align /:find q:quit",
             FLOW_FG, FLOW_BG, FLOW_BOLD);
+  if (fc_hud) {                                          /* DevTools panes: counts + ViewportLogger + NodeInspector + ChangeLogger */
+    flow_viewport v = flow_view_get(f);
+    int w = 24, h = 8;
+    int px = flow_surface_w(s) - w - 1, py = flow_surface_h(s) - h - 2;   /* above the statusbar row */
+    char line[64];
+    flow_box(s, px, py, w, h, FLOW_FG, FLOW_BG, FLOW_BOLD);
+    flow_text(s, px + 2, py + 1, "devtools", FLOW_FG, FLOW_BG, FLOW_BOLD);
+    snprintf(line, sizeof line, "nodes %d  edges %d  sel %d", flow_node_count(f), flow_edge_count(f), flow_selected_count(f));
+    flow_text(s, px + 2, py + 2, line, FLOW_FG, FLOW_BG, 0);                /* counts */
+    snprintf(line, sizeof line, "view %.0f,%.0f  z%.2f", v.ox, v.oy, v.zoom);
+    flow_text(s, px + 2, py + 3, line, FLOW_FG, FLOW_BG, 0);                /* ViewportLogger */
+    int fn = flow_focused_node(f);                                         /* NodeInspector: focused node's label */
+    flow_node *fnd = fn != -1 ? flow_get_node(f, fn) : NULL;
+    snprintf(line, sizeof line, "focus: %s", fnd && fnd->data ? (const char*)fnd->data : (fn != -1 ? "?" : "none"));
+    flow_text(s, px + 2, py + 4, line, FLOW_FG, FLOW_BG, 0);
+    snprintf(line, sizeof line, "undo %d  redo %d", flow_undo_depth(f), flow_redo_depth(f));
+    flow_text(s, px + 2, py + 5, line, FLOW_FG, FLOW_BG, 0);                /* ChangeLogger: depth */
+    snprintf(line, sizeof line, "last: %s", fc_op_name(flow_top_op(f)));
+    flow_text(s, px + 2, py + 6, line, FLOW_FG, FLOW_BG, 0);                /*   + most-recent op */
+  }
   if (fc_event[0]) flow_text(s, 1, 1, fc_event, FLOW_FG, FLOW_BG, FLOW_DIM);
   if (fc_pal.open) {
     char line[96]; int m[1]; int n = fc_pal_matches(f, m, 1);

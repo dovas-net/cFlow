@@ -123,6 +123,16 @@ static void flow__apply_op(flow_t *f, flow__op *op, int redo) {
 }
 int  flow_can_undo(flow_t *f) { return f->journal.n > 0; }
 int  flow_can_redo(flow_t *f) { return f->journal.rn > 0; }
+/* inc-6 #7: read-only journal introspection — pure reads of journal.n/.rn and the top
+   command's last op kind; safe any frame (no applying/txn guards needed — reads never
+   mutate, and an empty/txn-open journal is handled by the n==0 / nops==0 early returns). */
+int  flow_undo_depth(flow_t *f) { return f->journal.n; }
+int  flow_redo_depth(flow_t *f) { return f->journal.rn; }
+int  flow_top_op(flow_t *f) {
+  if (f->journal.n == 0) return -1;
+  struct flow__cmd *c = &f->journal.items[f->journal.n - 1];
+  return c->nops > 0 ? (int)c->ops[c->nops - 1].kind : -1;
+}
 void flow_undo(flow_t *f) {
   if (f->journal.n <= 0 || f->journal.applying || f->journal.txn_depth > 0) return; /* no mid-gesture undo */
   struct flow__cmd c = f->journal.items[--f->journal.n];

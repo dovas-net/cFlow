@@ -486,6 +486,75 @@ int main(void) {
     flow_free(f);
   }
 
+  /* ---- inc-6 #7 devtools-hud: read-only journal introspection (depth + top-op) ---- */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    /* 1. fresh-engine empty state */
+    ASSERT_INT(flow_undo_depth(f), 0, "fresh: undo depth 0");
+    ASSERT_INT(flow_redo_depth(f), 0, "fresh: redo depth 0");
+    ASSERT_INT(flow_top_op(f), -1, "fresh: top-op sentinel -1");
+
+    /* 2. depth tracks the stack; top-op reports the last kind */
+    int a = flow_add_node(f, "default", (flow_pt){5, 5},  DAT_A);
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, DAT_B);
+    ASSERT_INT(flow_undo_depth(f), 2, "two adds = depth 2 (== journal.n)");
+    ASSERT_INT(flow_redo_depth(f), 0, "no redo yet");
+    ASSERT_INT(flow_top_op(f), FLOW_CMD_ADD_NODE, "top-op is the last add");
+    flow_undo(f);
+    ASSERT_INT(flow_undo_depth(f), 1, "undo drops depth to 1");
+    ASSERT_INT(flow_redo_depth(f), 1, "undo grows redo to 1");
+    ASSERT_INT(flow_top_op(f), FLOW_CMD_ADD_NODE, "surviving top is the first add");
+    flow_redo(f);
+    ASSERT_INT(flow_undo_depth(f), 2, "redo restores depth 2");
+    ASSERT_INT(flow_redo_depth(f), 0, "redo empties redo stack");
+
+    /* 3. top-op reflects op KIND across mutation types */
+    flow_move_node(f, a, (flow_pt){10, 10});
+    ASSERT_INT(flow_top_op(f), FLOW_CMD_MOVE_NODE, "top-op tracks a move");
+    flow_add_edge(f, a, b, "", "");
+    ASSERT_INT(flow_top_op(f), FLOW_CMD_ADD_EDGE, "top-op tracks an add-edge");
+    flow_free(f);
+  }
+
+  /* 4. coalesced command returns its LAST op. flow_group's span is [ADD_NODE, REPARENT...]
+     (container added first, members reparented after — src/flow_model.h flow_group), so the
+     trailing op is the final REPARENT. (The spec prose's "ADD" example had the order inverted;
+     the contract is "the last op", which this asserts empirically.) */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){5, 5},  DAT_A);
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, DAT_B);
+    int d0 = flow_undo_depth(f);
+    int gid = flow_group(f, (int[]){ a, b }, 2);
+    ASSERT(gid != -1, "group succeeded");
+    ASSERT_INT(flow_undo_depth(f), d0 + 1, "group is ONE undo step (coalesced)");
+    ASSERT_INT(flow_top_op(f), FLOW_CMD_REPARENT, "top-op is the trailing op (the final member REPARENT)");
+    flow_free(f);
+  }
+
+  /* 5. journaling-disabled and fully-undone both read the empty state */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_add_node(f, "default", (flow_pt){5, 5}, DAT_A);
+    flow_set_undo_limit(f, 0);                          /* disables journaling, clears the stack */
+    ASSERT_INT(flow_undo_depth(f), 0, "limit 0: depth 0");
+    ASSERT_INT(flow_redo_depth(f), 0, "limit 0: redo 0");
+    ASSERT_INT(flow_top_op(f), -1, "limit 0: top-op -1");
+    int n0 = flow_node_count(f);
+    flow_add_node(f, "default", (flow_pt){20, 5}, DAT_B);  /* still mutates, records nothing */
+    ASSERT_INT(flow_node_count(f), n0 + 1, "graph still mutates with journaling off");
+    ASSERT_INT(flow_undo_depth(f), 0, "still depth 0 (journaling off)");
+    flow_free(f);
+
+    flow_t *g = flow_new(80, 24); flow_register_defaults(g);
+    flow_add_node(g, "default", (flow_pt){5, 5},  DAT_A);
+    flow_add_node(g, "default", (flow_pt){20, 5}, DAT_B);
+    flow_undo(g); flow_undo(g);                          /* fully undone */
+    ASSERT_INT(flow_undo_depth(g), 0, "fully undone: depth 0");
+    ASSERT_INT(flow_top_op(g), -1, "fully undone: top-op -1");
+    flow_free(g);
+  }
+
   /* ---- teardown: pending undo + redo history with dup'd labels + borrowed data ---- */
   {
     flow_t *f = flow_new(80, 24); flow_register_defaults(f);
