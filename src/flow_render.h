@@ -249,7 +249,15 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       flow_pt s = flow__handle_screen(f, n, h);         /* same projection as flow_hit_handle */
       unsigned bold = (n->id == f->conn_node && h &&
                        strncmp(h->id, f->conn_handle, sizeof h->id) == 0) ? FLOW_BOLD : 0;
-      flow_cellbuf_put(&cb, s.x, s.y, 0x25C9, f->theme.handle, f->theme.bg, bold);  /* ◉ */
+      uint8_t hfg = f->theme.handle;
+      /* inc-7 #2: recolor the candidate target handle green/red — the live connection cue.
+         Matched the same way the source-bold check matches conn_handle. LOD-0 only: the
+         collapsed LOD-1 marker is not a legible per-handle affordance (parity with the
+         marching-ants LOD-0 gate). Validity itself (flow_connection_valid) is LOD-independent. */
+      if (f->conn_active && elod == 0 && h && n->id == f->conn_target_node &&
+          strncmp(h->id, f->conn_target_handle, sizeof h->id) == 0)
+        hfg = f->conn_valid ? f->theme.handle_valid : f->theme.handle_invalid;
+      flow_cellbuf_put(&cb, s.x, s.y, 0x25C9, hfg, f->theme.bg, bold);  /* ◉ */
     }
   }
 

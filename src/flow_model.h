@@ -109,6 +109,7 @@ void flow_focus_prev(flow_t *f);            /* Shift-Tab: previous VISIBLE node,
 void flow_set_center(flow_t *f, int wx, int wy, float zoom); /* declared here for the focus framing call; defined in flow_view.h (same TU — the flow_undo precedent) */
 int flow_begin_connection(flow_t *f, int node, const char *handle); /* enter connecting from source handle; 0 ok, -1 if not a valid source */
 int flow_update_connection(flow_t *f, flow_pt screen);           /* move free end to screen cell; returns hovered candidate target node id or -1 */
+int flow_connection_valid(flow_t *f);                            /* inc-7 #2: 1 if the current in-flight candidate drop WOULD accept (resolved handle under cursor), else 0 (no connection, self, duplicate, or validator veto). Recomputed each flow_update_connection. */
 int flow_end_connection(flow_t *f, int node, const char *handle);/* complete: add edge src->node; returns new edge id or -1; clears connecting */
 void flow_cancel_connection(flow_t *f);                          /* abort in-flight connection */
 int flow_connecting(flow_t *f);                                  /* 1 while a connection/preview is in flight */
@@ -364,6 +365,7 @@ struct flow {
                                      transient — never journaled/persisted */
   flow_select_mode marquee_mode;                              /* default mode for shift-drag marquee */
   int conn_active, conn_node; char conn_handle[16]; flow_pt conn_end; /* in-flight connection: source node/handle + free end (screen) */
+  int conn_valid; int conn_target_node; char conn_target_handle[16]; /* inc-7 #2: live connection-validity cache — would the drop accept, and the candidate node + RESOLVED handle the render recolor matches. Transient: never saved/journaled. conn_target_node inits -1; the other two are calloc-correct. */
   flow_connection_validator validator_fn; void *validator_user;       /* isValidConnection gate (inc-4 #9); NULL = allow all (calloc default) */
   flow_key_hook key_hook_fn; void *key_hook_user;                     /* pre-dispatch key gate (inc-5 #10); NULL = none (calloc default) */
   int key_hook_modal;                                                 /* inc-6 #6: while set AND a hook is installed, an unconsumed seq is DROPPED in flow_dispatch_key (never falls through). Calloc 0 = off. Transient — not journaled, not saved. */
@@ -563,6 +565,7 @@ flow_t *flow_new(int cols, int rows) {
   f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1; f->focus_node = -1;
+  f->conn_target_node = -1;                                    /* inc-7 #2: no candidate (calloc 0 is a valid node id) */
   f->reconnect_edge = -1; f->last_click_node = -1; f->last_click_edge = -1;
   f->autopan_margin = 3; f->autopan_speed = 2;
   f->tick_ms = 100;                                            /* inc-6 #4: 10 Hz redraw when armed; tick stays calloc-zero */
@@ -804,16 +807,40 @@ void flow_ungroup(flow_t *f, int id) {
   flow_remove_node(f, id);                             /* now childless: its subtree snap is the container alone */
   flow__undo_end(f);
 }
-int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
-  if (src == dst) return -1;
-  if (!flow_get_node(f, src) || !flow_get_node(f, dst)) return -1;
+/* inc-7 #2: the SINGLE accept predicate, factored out of flow_add_edge so the live
+   connection preview and the commit can never drift. Mirrors the rejects verbatim
+   (self / missing endpoint / duplicate / validator), normalizing handles internally
+   (NULL -> ""). exclude_edge = an edge id to skip in the duplicate scan (-1 for a fresh
+   connect; the reconnected edge's id for flow_reconnect_edge), so the one predicate
+   serves add, preview AND reconnect. Returns nonzero iff the edge WOULD be accepted. */
+static int flow__connection_would_accept(flow_t *f, int src, int dst,
+                                         const char *sh, const char *th, int exclude_edge) {
+  if (src == dst) return 0;
+  if (!flow_get_node(f, src) || !flow_get_node(f, dst)) return 0;
   const char *shs = sh ? sh : "", *ths = th ? th : "";
-  for (int i = 0; i < f->nedges; i++)                          /* dup = same (source,target,handles) */
+  for (int i = 0; i < f->nedges; i++) {                        /* dup = same (source,target,handles) */
+    if (f->edges[i].id == exclude_edge) continue;             /* reconnect: skip the edge being moved */
     if (f->edges[i].source == src && f->edges[i].target == dst &&
-        strcmp(f->edges[i].source_handle, shs) == 0 && strcmp(f->edges[i].target_handle, ths) == 0) return -1;
-  /* engine validator gate (inc-4 #9): AFTER the fast structural rejects, BEFORE the
-     append/record. Silent reject: -1, nothing journaled. */
-  if (f->validator_fn && !f->validator_fn(f, src, dst, shs, ths, f->validator_user)) return -1;
+        strcmp(f->edges[i].source_handle, shs) == 0 && strcmp(f->edges[i].target_handle, ths) == 0) return 0;
+  }
+  if (f->validator_fn && !f->validator_fn(f, src, dst, shs, ths, f->validator_user)) return 0;
+  return 1;
+}
+/* inc-7 #2: the target-handle defaulting, factored from flow_end_connection: an explicit
+   `handle` if non-NULL, else the first TARGET/BOTH handle on `node`, else NULL. Preview
+   and commit both resolve-THEN-check on the IDENTICAL resolved handle (anti-drift). */
+static const char *flow__resolve_target_handle(flow_t *f, int node, const char *handle) {
+  if (handle) return handle;
+  if (node == -1) return NULL;
+  int hc = flow_node_handle_count(f, node);
+  for (int j = 0; j < hc; j++) {
+    const flow_handle *h = flow_node_handle_at(f, node, j);
+    if (h && (h->kind == FLOW_HANDLE_TARGET || h->kind == FLOW_HANDLE_BOTH)) return h->id;
+  }
+  return NULL;
+}
+int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
+  if (!flow__connection_would_accept(f, src, dst, sh, th, -1)) return -1;  /* the one shared gate */
   f->edges = (flow_edge*)flow__grow(f->edges, &f->capedges, f->nedges + 1, sizeof(flow_edge));
   flow_edge *e = &f->edges[f->nedges++]; memset(e, 0, sizeof *e);
   e->id = f->nexteid++; e->source = src; e->target = dst;
@@ -1047,16 +1074,10 @@ void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *han
   const char *nsh = e->source_handle, *nth = e->target_handle;
   const char *hs = handle ? handle : "";
   if (which == 0) { nsrc = endpoint_node; nsh = hs; } else { ntgt = endpoint_node; nth = hs; }
-  if (nsrc == ntgt) return;                                    /* reject self-edge */
-  for (int i = 0; i < f->nedges; i++) {                        /* reject duplicate (skip this edge) */
-    if (f->edges[i].id == edge) continue;
-    if (f->edges[i].source == nsrc && f->edges[i].target == ntgt &&
-        strcmp(f->edges[i].source_handle, nsh) == 0 &&
-        strcmp(f->edges[i].target_handle, nth) == 0) return;
-  }
-  /* engine validator gate (inc-4 #9): sees the PROSPECTIVE endpoints, after the
-     structural rejects, before the record. Silent reject: edge left unchanged. */
-  if (f->validator_fn && !f->validator_fn(f, nsrc, ntgt, nsh, nth, f->validator_user)) return;
+  /* inc-7 #2: same shared accept predicate as flow_add_edge — self/duplicate/validator,
+     skipping THIS edge in the duplicate scan (exclude_edge = edge). Silent reject leaves
+     the edge unchanged. */
+  if (!flow__connection_would_accept(f, nsrc, ntgt, nsh, nth, edge)) return;
   if (flow__rec_gate(f))                /* validated: record old endpoint+handle BEFORE the commit */
     flow__rec_reconnect(f, edge, which,
                         which == 0 ? e->source : e->target,
@@ -1571,6 +1592,7 @@ static const flow_handle *flow__handle_named(flow_t *f, int node, const char *id
 int flow_begin_connection(flow_t *f, int node, const char *handle) {
   const flow_handle *h = flow__handle_named(f, node, handle);
   if (!h || (h->kind != FLOW_HANDLE_SOURCE && h->kind != FLOW_HANDLE_BOTH)) return -1;  /* must be a source */
+  f->conn_target_node = -1; f->conn_target_handle[0] = 0; f->conn_valid = 0;  /* inc-7 #2: a fresh gesture starts with no candidate (no stale recolor before the first motion) */
   f->conn_active = 1; f->conn_node = node;
   snprintf(f->conn_handle, sizeof f->conn_handle, "%s", handle ? handle : "");
   flow_node *n = flow_get_node(f, node);
@@ -1581,23 +1603,32 @@ int flow_begin_connection(flow_t *f, int node, const char *handle) {
 int flow_update_connection(flow_t *f, flow_pt screen) {
   if (!f->conn_active) return -1;
   f->conn_end = screen;
-  int tn = -1; (void)flow_hit_handle(f, screen, &tn);   /* prefer a handle under the cursor */
+  int tn = -1; int hidx = flow_hit_handle(f, screen, &tn);  /* capture the index (was discarded): a specific-handle hover vs a body hover */
   if (tn == -1) tn = flow_hit_node(f, screen);          /* else any node body */
-  if (tn != -1 && tn != f->conn_node) flow_set_hover(f, tn);  /* reveal candidate's handles */
+  /* inc-7 #2: recompute the live validity cache each motion. Default = no candidate. */
+  f->conn_target_node = -1; f->conn_target_handle[0] = 0; f->conn_valid = 0;
+  if (tn != -1 && tn != f->conn_node) {
+    flow_set_hover(f, tn);                               /* reveal candidate's handles */
+    /* the SPECIFIC handle under the cursor, else default — resolve-THEN-check on the SAME
+       handle the commit path resolves (flow__resolve_connection_at, src/flow_input.h:48-52),
+       so the green/red preview can never lie about what the drop will do. */
+    const flow_handle *hh = (hidx >= 0) ? flow_node_handle_at(f, tn, hidx) : NULL;
+    const char *rth = flow__resolve_target_handle(f, tn, hh ? hh->id : NULL);
+    f->conn_target_node = tn;
+    if (rth) snprintf(f->conn_target_handle, sizeof f->conn_target_handle, "%s", rth);
+    f->conn_valid = flow__connection_would_accept(f, f->conn_node, tn, f->conn_handle, rth, -1);
+  }
   return (tn != f->conn_node) ? tn : -1;
 }
+int flow_connection_valid(flow_t *f) { return (f->conn_active && f->conn_valid) ? 1 : 0; }  /* bound to the active gesture */
 int flow_end_connection(flow_t *f, int node, const char *handle) {
   if (!f->conn_active) return -1;
   int src = f->conn_node; char sh[16]; snprintf(sh, sizeof sh, "%s", f->conn_handle);
   /* clear connecting state up-front so a rejected add never leaves us stuck */
   f->conn_active = 0; f->conn_node = -1; f->conn_handle[0] = 0;
-  /* target handle: explicit name, else first TARGET/BOTH handle on the node */
-  const char *th = handle;
-  if (!th && node != -1) {
-    int hc = flow_node_handle_count(f, node);
-    for (int j = 0; j < hc; j++) { const flow_handle *h = flow_node_handle_at(f, node, j);
-      if (h && (h->kind == FLOW_HANDLE_TARGET || h->kind == FLOW_HANDLE_BOTH)) { th = h->id; break; } }
-  }
+  /* target handle defaulting — shared with the live preview via flow__resolve_target_handle
+     so commit and preview pick the IDENTICAL handle (inc-7 #2 anti-drift). */
+  const char *th = flow__resolve_target_handle(f, node, handle);
   flow__undo_begin(f);                            /* connect (incl. any on_connect follow-ups) = ONE undo step */
   int eid = flow_add_edge(f, src, node, sh, th);
   if (eid != -1 && f->cb.on_connect) f->cb.on_connect(f, src, node, f->cb.user);

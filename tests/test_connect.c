@@ -35,6 +35,25 @@ static void lc_reset(void) {
   eclick_fires = 0; eclick_seq = 0; nclick_fires = 0; ectx_fires = 0; ectx_seq = 0;
 }
 
+/* inc-7 #2 connect-feedback fixtures */
+static int cf_reject_all(flow_t *f, int s, int t, const char *sh, const char *th, void *u) {
+  (void)f;(void)s;(void)t;(void)sh;(void)th;(void)u; return 0;
+}
+static const flow_handle cf_two_handles[] = {
+  { "in1", FLOW_HANDLE_TARGET, FLOW_LEFT,  0 },
+  { "in2", FLOW_HANDLE_TARGET, FLOW_LEFT,  1 },
+  { "out", FLOW_HANDLE_SOURCE, FLOW_RIGHT, 0 },
+};
+static const flow_node_type cf_two_target_type = {
+  "twoT", flow__default_measure, flow__default_render, cf_two_handles, 3, NULL, NULL, NULL
+};
+/* screen cell of node's handle `hid` — render and hit-test share flow__handle_screen */
+static flow_pt cf_hcell(flow_t *f, int node, const char *hid) {
+  flow_node *n = flow_get_node(f, node);
+  const flow_handle *h = flow__handle_named(f, node, hid);
+  return flow__handle_screen(f, n, h);
+}
+
 int main(void) {
   /* ---- flow_handle_anchor math ---- */
   {
@@ -455,6 +474,171 @@ int main(void) {
     ASSERT_INT(ectx_fires, 1, "  and on_edge_context fires for the same press");
     ASSERT(end_seq < ectx_seq, "  ordering: end BEFORE context");
     (void)a; (void)c; (void)d;
+    flow_free(f);
+  }
+
+  /* ================= inc-7 #2: live connection-validity feedback ================= */
+  /* (1) flow_connection_valid truth table (compile-RED on the new symbol). */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    ASSERT_INT(flow_connection_valid(f), 0, "no connection => invalid");
+    flow_begin_connection(f, a, "out");
+    flow_update_connection(f, cf_hcell(f, b, "in"));     /* over B's target handle */
+    ASSERT_INT(flow_connection_valid(f), 1, "fresh A->B valid");
+    flow_update_connection(f, cf_hcell(f, a, "in"));     /* over the source node itself */
+    ASSERT_INT(flow_connection_valid(f), 0, "self-target invalid");
+    flow_free(f);
+  }
+
+  /* (1b) the validity cache is bound to the ACTIVE gesture: the accessor reads 0 once a
+     gesture ends, and a fresh begin clears stale candidate state (no recolor flash). */
+  {
+    int W = 80, H = 24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    flow_begin_connection(f, a, "out");
+    flow_update_connection(f, cf_hcell(f, b, "in"));
+    ASSERT_INT(flow_connection_valid(f), 1, "g1: candidate valid mid-flight");
+    flow_end_connection(f, b, "in");                     /* commit A->B(out,in) */
+    ASSERT_INT(flow_connection_valid(f), 0, "after end: no active connection => 0 (not stale 1)");
+    /* gesture 2: begin only — the cache must be clear BEFORE the first motion so a render
+       does not recolor gesture-1's (still-hovered) candidate handle. */
+    flow_begin_connection(f, a, "out");
+    ASSERT_INT(flow_connection_valid(f), 0, "after begin (pre-motion): 0, no stale candidate");
+    flow_render(f, buf, W, H);
+    flow_pt bc = cf_hcell(f, b, "in");
+    ASSERT_INT(buf[bc.y*W + bc.x].fg, f->theme.handle, "pre-motion: B handle NOT stale-recolored");
+    flow_cancel_connection(f);
+    free(buf); flow_free(f);
+  }
+
+  /* (2) candidate handle fg DIFFERS valid vs reject-duplicate (the audit discriminator,
+     read buf[i].fg directly — cells_to_string is glyph-only). */
+  {
+    int W = 80, H = 24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5},  (void*)"B");
+    int c = flow_add_node(f, "default", (flow_pt){30, 15}, (void*)"C");
+    flow_begin_connection(f, a, "out"); flow_end_connection(f, b, "in");  /* commit A->B(out,in) */
+    /* duplicate target B */
+    flow_begin_connection(f, a, "out");
+    flow_pt bc = cf_hcell(f, b, "in");
+    flow_update_connection(f, bc);
+    ASSERT_INT(flow_connection_valid(f), 0, "duplicate target => invalid");
+    flow_render(f, buf, W, H);
+    uint8_t dup_fg = buf[bc.y*W + bc.x].fg;
+    flow_cancel_connection(f);
+    /* fresh target C */
+    flow_begin_connection(f, a, "out");
+    flow_pt cc = cf_hcell(f, c, "in");
+    flow_update_connection(f, cc);
+    ASSERT_INT(flow_connection_valid(f), 1, "fresh target => valid");
+    flow_render(f, buf, W, H);
+    uint8_t valid_fg = buf[cc.y*W + cc.x].fg;
+    ASSERT(valid_fg != dup_fg, "candidate handle fg differs valid vs reject-duplicate");
+    ASSERT_INT(valid_fg, f->theme.handle_valid, "valid candidate fg == theme.handle_valid");
+    ASSERT_INT(dup_fg, f->theme.handle_invalid, "dup candidate fg == theme.handle_invalid");
+    flow_cancel_connection(f);
+    free(buf); flow_free(f);
+  }
+
+  /* (2b) two-target node: the hidx discriminator — a hover specifically over the FREE
+     target handle is valid while the TAKEN one is invalid. Needs the candidate hovered
+     (a real drag hovers it on a prior motion), so pre-hover via flow_set_hover. */
+  {
+    int W = 80, H = 24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    flow_register_node_type(f, &cf_two_target_type);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "twoT",    (flow_pt){30, 5}, (void*)"B");
+    flow_begin_connection(f, a, "out"); flow_end_connection(f, b, "in1");  /* occupy in1 */
+    flow_begin_connection(f, a, "out"); flow_set_hover(f, b);
+    flow_pt c2 = cf_hcell(f, b, "in2");
+    flow_update_connection(f, c2);
+    ASSERT_INT(flow_connection_valid(f), 1, "hover free in2 => valid");
+    flow_render(f, buf, W, H);
+    ASSERT_INT(buf[c2.y*W + c2.x].fg, f->theme.handle_valid, "in2 candidate handle green");
+    flow_pt c1 = cf_hcell(f, b, "in1");
+    flow_update_connection(f, c1);
+    ASSERT_INT(flow_connection_valid(f), 0, "hover taken in1 => invalid (duplicate)");
+    flow_render(f, buf, W, H);
+    ASSERT_INT(buf[c1.y*W + c1.x].fg, f->theme.handle_invalid, "in1 candidate handle red");
+    flow_cancel_connection(f);
+    free(buf); flow_free(f);
+  }
+
+  /* (3) validator veto colors invalid on a structurally-fine target; commit agrees. */
+  {
+    int W = 80, H = 24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    flow_set_connection_validator(f, cf_reject_all, NULL);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    flow_begin_connection(f, a, "out");
+    flow_pt bc = cf_hcell(f, b, "in");
+    flow_update_connection(f, bc);
+    ASSERT_INT(flow_connection_valid(f), 0, "validator veto => invalid");
+    flow_render(f, buf, W, H);
+    ASSERT_INT(buf[bc.y*W + bc.x].fg, f->theme.handle_invalid, "vetoed candidate handle red");
+    ASSERT_INT(flow_end_connection(f, b, "in"), -1, "commit also rejected by validator");
+    ASSERT_INT(flow_edge_count(f), 0, "no edge created");
+    free(buf); flow_free(f);
+  }
+
+  /* (4) body-hover over an already-connected node => invalid (defaulted duplicate). The
+     discriminator that catches a lone-predicate impl that skipped the handle defaulting. */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    flow_begin_connection(f, a, "out"); flow_end_connection(f, b, "in");
+    flow_begin_connection(f, a, "out");
+    flow_update_connection(f, (flow_pt){31, 6});   /* B body interior, NOT a handle cell */
+    ASSERT_INT(flow_connection_valid(f), 0, "body-hover over connected node => invalid (defaulted dup)");
+    ASSERT_INT(flow_end_connection(f, b, NULL), -1, "commit parity: defaulted dup rejected");
+    flow_free(f);
+  }
+
+  /* (6) LOD-1: validity is LOD-independent but the visual cue is suppressed. */
+  {
+    int W = 80, H = 24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){30, 5}, (void*)"B");
+    flow_begin_connection(f, a, "out");
+    flow_update_connection(f, cf_hcell(f, b, "in"));
+    ASSERT_INT(flow_connection_valid(f), 1, "validity computed at zoom 1");
+    flow_set_zoom(f, 0.5f, (flow_pt){0, 0});
+    ASSERT_INT(flow__lod_for(f, flow_zoom(f)), 1, "0.5 zoom is LOD 1");
+    flow_pt bc2 = cf_hcell(f, b, "in");           /* collapsed marker cell */
+    flow_update_connection(f, bc2);
+    ASSERT_INT(flow_connection_valid(f), 1, "validity is LOD-independent");
+    flow_render(f, buf, W, H);
+    ASSERT(buf[bc2.y*W + bc2.x].fg != f->theme.handle_valid, "LOD-1 cue suppressed (no green recolor)");
+    free(buf); flow_free(f);
+  }
+
+  /* (7) commit-side agreement: the real release path resolves the SAME specific handle
+     the preview highlighted (flow__resolve_connection_at IS the release logic). */
+  {
+    flow_t *f = flow_new(80, 24); flow_register_defaults(f);
+    flow_register_node_type(f, &cf_two_target_type);
+    int a = flow_add_node(f, "default", (flow_pt){10, 5}, (void*)"A");
+    int b = flow_add_node(f, "twoT",    (flow_pt){30, 5}, (void*)"B");
+    flow_begin_connection(f, a, "out"); flow_set_hover(f, b);
+    flow_pt c2 = cf_hcell(f, b, "in2");
+    flow_update_connection(f, c2);
+    ASSERT_INT(flow_connection_valid(f), 1, "preview: in2 valid");
+    flow__resolve_connection_at(f, c2);            /* the real input release path */
+    int found = -1;
+    for (int i = 0; i < flow_edge_count(f); i++)
+      if (flow_edges(f)[i].source == a && flow_edges(f)[i].target == b) found = i;
+    ASSERT(found >= 0, "edge committed A->B");
+    if (found >= 0) ASSERT_STR(flow_edges(f)[found].target_handle, "in2", "commit resolved in2 (matches preview)");
     flow_free(f);
   }
 
