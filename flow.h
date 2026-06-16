@@ -532,6 +532,21 @@ void flow_set_controls(flow_t *f, int enabled, flow_corner corner);
 void flow_set_locked(flow_t *f, int on);
 int  flow_locked(flow_t *f);
 
+/* Toolbar action (inc-7 #4): one entry in a node/edge toolbar's borrowed action array.
+   SHARED by node-toolbar (#4) and edge-toolbar (#5) — the generic `id` is a node OR an
+   edge id. The engine stores the array as a borrowed pointer (NO copy, NO heap) and never
+   copies the label strings; the app must keep the array alive while it is installed. */
+typedef struct {
+  const char *label;                          /* borrowed cell text drawn for the button */
+  void (*fn)(flow_t *f, int id, void *user);  /* invoked with the selected node/edge id on a cell press */
+  void *user;                                 /* opaque, passed through to fn */
+} flow_toolbar_action;
+
+/* Node toolbar (inc-7 #4): a selection-anchored action strip drawn one row above the
+   single selected node (flow_selected_count(f)==1), riding the controls-bar widget seam.
+   BORROWED array; NULL/0 disarms. Transient chrome: never saved, never journaled. */
+void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n);
+
 /* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
    xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
    the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
@@ -594,6 +609,7 @@ struct flow {
   int statusbar;  /* built-in bottom help/status line */
   int locked;     /* inc-7 #3: whole-canvas lock (Controls [lock]) — suppress drag/connect/reconnect/marquee/click-select; pan+zoom still work. Transient: never saved/journaled. */
   struct { int enabled; flow_corner corner; } controls;  /* inc-7 #3: Controls bar config (off by default; the minimap value-struct precedent) */
+  struct { const flow_toolbar_action *actions; int n; } node_toolbar;  /* inc-7 #4: borrowed action array ({NULL,0}=off) */
   struct { int x, y, w, h, owner, action; } widgets[16]; int nwidgets;  /* inc-7 #3: render-filled widget hit-rect cache (no heap) — drawn region == hittable region; refilled each frame */
   struct {                                  /* selection clipboard (inc-5 #7): deep snapshots.
                                                node snaps store ABS pos in .node.pos (resolved at
@@ -1278,6 +1294,7 @@ flow_color_mode flow_color_mode_get(flow_t *f) { return f->color_mode; }
 void flow_set_controls(flow_t *f, int enabled, flow_corner corner) { f->controls.enabled = enabled ? 1 : 0; f->controls.corner = corner; }
 void flow_set_locked(flow_t *f, int on) { f->locked = on ? 1 : 0; }
 int  flow_locked(flow_t *f) { return f->locked; }
+void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->node_toolbar.actions = actions; f->node_toolbar.n = n; }
 int flow_selected_edge(flow_t *f) {
   for (int i = 0; i < f->nedges; i++) if (f->edges[i].flags & FLOW_SELECTED) return f->edges[i].id;
   return -1;
@@ -2898,6 +2915,47 @@ static void flow__controls(flow_t *f, flow_cellbuf *cb) {
     }
   }
 }
+/* inc-7 #4: display-cell (codepoint) count of a label — flow_text draws one cell each. */
+static int flow__label_cells(const char *s) {
+  int n = 0; if (!s) return 0;
+  while (*s) { uint32_t cp; s += flow_utf8_decode(s, &cp); n++; }
+  return n;
+}
+/* inc-7 #4: the node toolbar — a one-row action strip anchored one row ABOVE the single
+   selected node's footprint (flips below when there's no room), left-aligned to the node
+   and clamped on-screen. Draws each action label and records its rect in the SHARED
+   widgets[] cache (owner NODE_TOOLBAR, action = index) so the press hit-test routes to
+   exactly what's drawn. Constant screen-cell width (only the anchor scales with zoom).
+   Chrome color is theme.widget_fg/bg so it tracks color_mode. */
+static void flow__node_toolbar(flow_t *f, flow_cellbuf *cb) {
+  if (!f->node_toolbar.actions || f->node_toolbar.n <= 0) return;
+  if (flow_selected_count(f) != 1) return;
+  flow_node *n = flow_get_node(f, flow_selected_node(f));
+  if (!n) return;
+  flow_rect fp = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom));
+  int total = 0;                                   /* width = sum(label cells) + (n-1) separators */
+  for (int k = 0; k < f->node_toolbar.n; k++) { total += flow__label_cells(f->node_toolbar.actions[k].label); if (k) total += 1; }
+  if (total <= 0) return;
+  int sx = fp.x, sy = fp.y - 1;                    /* left-align to node, one row above */
+  if (sy < 0) sy = fp.y + fp.h;                    /* no room above: flip below */
+  if (sx + total > cb->w) sx = cb->w - total;      /* clamp on-screen (visible == hittable) */
+  if (sx < 0) sx = 0;
+  flow_surface s = { cb, 0, 0, cb->w, cb->h, 0, 0, cb->w, cb->h };
+  int cx = sx;
+  for (int k = 0; k < f->node_toolbar.n; k++) {
+    const char *label = f->node_toolbar.actions[k].label ? f->node_toolbar.actions[k].label : "";
+    int w = flow__label_cells(label);
+    flow_text(&s, cx, sy, label, f->theme.widget_fg, f->theme.widget_bg, 0);
+    if (w > 0 && f->nwidgets < (int)(sizeof f->widgets / sizeof f->widgets[0])) {
+      f->widgets[f->nwidgets].x = cx; f->widgets[f->nwidgets].y = sy;
+      f->widgets[f->nwidgets].w = w;  f->widgets[f->nwidgets].h = 1;
+      f->widgets[f->nwidgets].owner = FLOW_WIDGET_OWNER_NODE_TOOLBAR;
+      f->widgets[f->nwidgets].action = k;
+      f->nwidgets++;
+    }
+    cx += w + 1;                                   /* label + 1-cell separator */
+  }
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, f->theme.fg, f->theme.bg);
@@ -3070,6 +3128,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   if (f->minimap.enabled) flow__minimap(f, &cb);
   f->nwidgets = 0;                                   /* inc-7 #3: refill the widget hit-rect cache each frame (controls + #4/#5 toolbars append below) */
   if (f->controls.enabled) flow__controls(f, &cb);
+  flow__node_toolbar(f, &cb);                        /* inc-7 #4: gated internally on actions + single selection */
   if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 
   /* built-in status/help bar: drawn LAST (after the app overlay) on the bottom
@@ -3580,6 +3639,14 @@ static void flow__widget_press(flow_t *f, int i) {
         case FLOW_WIDGET_LOCK:     f->locked = !f->locked; break;
       }
       break;
+    case FLOW_WIDGET_OWNER_NODE_TOOLBAR: {       /* inc-7 #4: fire the action on the selected node */
+      int idx = f->widgets[i].action;
+      if (idx >= 0 && idx < f->node_toolbar.n) {
+        flow_toolbar_action a = f->node_toolbar.actions[idx];  /* copy BEFORE fn (may delete the node / swap the array) */
+        if (a.fn) a.fn(f, flow_selected_node(f), a.user);      /* pass the id, never a node pointer (realloc-safe) */
+      }
+      break;
+    }
     default: break;
   }
 }
@@ -3620,7 +3687,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
          directly (NO flow_to_world — that wrapper is for world-space graph elements). A hit
          dispatches and CONSUMES (the handle-grab reset shape, :134-136), so the press never
          falls through to the conn-resolve, the space-pan arm, the trio, or the release click. */
-      for (int wi = 0; wi < f->nwidgets; wi++) {
+      for (int wi = f->nwidgets - 1; wi >= 0; wi--) {  /* reverse: last-appended == topmost-drawn wins the hit (render order = controls, then toolbars) */
         if (scr.x >= f->widgets[wi].x && scr.x < f->widgets[wi].x + f->widgets[wi].w &&
             scr.y >= f->widgets[wi].y && scr.y < f->widgets[wi].y + f->widgets[wi].h) {
           flow__widget_press(f, wi);

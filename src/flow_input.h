@@ -84,6 +84,14 @@ static void flow__widget_press(flow_t *f, int i) {
         case FLOW_WIDGET_LOCK:     f->locked = !f->locked; break;
       }
       break;
+    case FLOW_WIDGET_OWNER_NODE_TOOLBAR: {       /* inc-7 #4: fire the action on the selected node */
+      int idx = f->widgets[i].action;
+      if (idx >= 0 && idx < f->node_toolbar.n) {
+        flow_toolbar_action a = f->node_toolbar.actions[idx];  /* copy BEFORE fn (may delete the node / swap the array) */
+        if (a.fn) a.fn(f, flow_selected_node(f), a.user);      /* pass the id, never a node pointer (realloc-safe) */
+      }
+      break;
+    }
     default: break;
   }
 }
@@ -124,7 +132,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
          directly (NO flow_to_world — that wrapper is for world-space graph elements). A hit
          dispatches and CONSUMES (the handle-grab reset shape, :134-136), so the press never
          falls through to the conn-resolve, the space-pan arm, the trio, or the release click. */
-      for (int wi = 0; wi < f->nwidgets; wi++) {
+      for (int wi = f->nwidgets - 1; wi >= 0; wi--) {  /* reverse: last-appended == topmost-drawn wins the hit (render order = controls, then toolbars) */
         if (scr.x >= f->widgets[wi].x && scr.x < f->widgets[wi].x + f->widgets[wi].w &&
             scr.y >= f->widgets[wi].y && scr.y < f->widgets[wi].y + f->widgets[wi].h) {
           flow__widget_press(f, wi);

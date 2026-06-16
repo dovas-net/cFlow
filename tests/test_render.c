@@ -514,6 +514,21 @@ int main(void) {
     free(cbuf); flow_free(cf);
   }
 
+  /* inc-7 #4: node toolbar golden — one selected node, a 2-action strip one row above.
+     OFF by default (no toolbar installed elsewhere) keeps every existing golden identical. */
+  {
+    int W = 24, H = 8; flow_cell *tbuf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *tf = flow_new(W, H); flow_register_defaults(tf);
+    int a = flow_add_node(tf, "default", (flow_pt){3, 3}, (void*)"N");
+    static const flow_toolbar_action acts[] = { { "del", NULL, NULL }, { "dup", NULL, NULL } };
+    flow_set_node_toolbar(tf, acts, 2);
+    flow_select_node(tf, a, 0);
+    flow_render(tf, tbuf, W, H);
+    char *s = cells_to_string(tbuf, W, H);
+    SNAPSHOT("render_node_toolbar", s); free(s);
+    free(tbuf); flow_free(tf);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

@@ -335,6 +335,21 @@ void flow_set_controls(flow_t *f, int enabled, flow_corner corner);
 void flow_set_locked(flow_t *f, int on);
 int  flow_locked(flow_t *f);
 
+/* Toolbar action (inc-7 #4): one entry in a node/edge toolbar's borrowed action array.
+   SHARED by node-toolbar (#4) and edge-toolbar (#5) — the generic `id` is a node OR an
+   edge id. The engine stores the array as a borrowed pointer (NO copy, NO heap) and never
+   copies the label strings; the app must keep the array alive while it is installed. */
+typedef struct {
+  const char *label;                          /* borrowed cell text drawn for the button */
+  void (*fn)(flow_t *f, int id, void *user);  /* invoked with the selected node/edge id on a cell press */
+  void *user;                                 /* opaque, passed through to fn */
+} flow_toolbar_action;
+
+/* Node toolbar (inc-7 #4): a selection-anchored action strip drawn one row above the
+   single selected node (flow_selected_count(f)==1), riding the controls-bar widget seam.
+   BORROWED array; NULL/0 disarms. Transient chrome: never saved, never journaled. */
+void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n);
+
 /* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
    xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
    the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
@@ -397,6 +412,7 @@ struct flow {
   int statusbar;  /* built-in bottom help/status line */
   int locked;     /* inc-7 #3: whole-canvas lock (Controls [lock]) — suppress drag/connect/reconnect/marquee/click-select; pan+zoom still work. Transient: never saved/journaled. */
   struct { int enabled; flow_corner corner; } controls;  /* inc-7 #3: Controls bar config (off by default; the minimap value-struct precedent) */
+  struct { const flow_toolbar_action *actions; int n; } node_toolbar;  /* inc-7 #4: borrowed action array ({NULL,0}=off) */
   struct { int x, y, w, h, owner, action; } widgets[16]; int nwidgets;  /* inc-7 #3: render-filled widget hit-rect cache (no heap) — drawn region == hittable region; refilled each frame */
   struct {                                  /* selection clipboard (inc-5 #7): deep snapshots.
                                                node snaps store ABS pos in .node.pos (resolved at
@@ -1081,6 +1097,7 @@ flow_color_mode flow_color_mode_get(flow_t *f) { return f->color_mode; }
 void flow_set_controls(flow_t *f, int enabled, flow_corner corner) { f->controls.enabled = enabled ? 1 : 0; f->controls.corner = corner; }
 void flow_set_locked(flow_t *f, int on) { f->locked = on ? 1 : 0; }
 int  flow_locked(flow_t *f) { return f->locked; }
+void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->node_toolbar.actions = actions; f->node_toolbar.n = n; }
 int flow_selected_edge(flow_t *f) {
   for (int i = 0; i < f->nedges; i++) if (f->edges[i].flags & FLOW_SELECTED) return f->edges[i].id;
   return -1;

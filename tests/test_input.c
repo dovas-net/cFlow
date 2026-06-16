@@ -10,6 +10,15 @@ static void spress(flow_t *f, int cx, int cy)  { char b[40]; int n = snprintf(b,
 /* middle cell (x) / row (y) of the Controls button with the given action (render first to fill the cache) */
 static int wx_for(flow_t *f, int action) { for (int i = 0; i < f->nwidgets; i++) if (f->widgets[i].owner == FLOW_WIDGET_OWNER_CONTROLS && f->widgets[i].action == action) return f->widgets[i].x + 1; return -1; }
 static int wy_for(flow_t *f, int action) { for (int i = 0; i < f->nwidgets; i++) if (f->widgets[i].owner == FLOW_WIDGET_OWNER_CONTROLS && f->widgets[i].action == action) return f->widgets[i].y; return -1; }
+/* inc-7 #4 node-toolbar fixtures */
+static int g_nt_id = -2, g_nt_idx = -2, g_nt_fires = 0;
+static void nt_cap(flow_t *f, int id, void *u) { (void)f; g_nt_id = id; g_nt_idx = (int)(intptr_t)u; g_nt_fires++; }
+static void nt_del(flow_t *f, int id, void *u) { (void)u; flow_remove_node(f, id); }   /* realloc-forcing action */
+static int g_nclick = 0;
+static void nt_onclick(flow_t *f, int id, void *u) { (void)f;(void)id;(void)u; g_nclick++; }
+/* x,y of toolbar cell `action` for the given owner (render first to fill the cache); -1 if absent */
+static int tbx(flow_t *f, int owner, int action) { for (int i = 0; i < f->nwidgets; i++) if (f->widgets[i].owner == owner && f->widgets[i].action == action) return f->widgets[i].x; return -1; }
+static int tby(flow_t *f, int owner, int action) { for (int i = 0; i < f->nwidgets; i++) if (f->widgets[i].owner == owner && f->widgets[i].action == action) return f->widgets[i].y; return -1; }
 
 int main(void) {
   flow_t *f = flow_new(80, 24); flow_register_defaults(f);
@@ -208,6 +217,112 @@ int main(void) {
     press(g, wx_for(g, FLOW_WIDGET_ZOOM_IN), wy_for(g, FLOW_WIDGET_ZOOM_IN));
     ASSERT(flow_zoom(g) > z0, "widget consumed the press ABOVE space-pan arm");
     ASSERT_INT(g->mouse_down, 0, "no pan armed (widget consumed, mouse_down cleared)");
+    free(buf); flow_free(g);
+  }
+
+  /* ===== inc-7 #4: node toolbar (selection-anchored action strip) ===== */
+  static const flow_toolbar_action NT_ACTS[] = {
+    { "del", nt_cap, (void*)(intptr_t)0 },
+    { "dup", nt_cap, (void*)(intptr_t)1 },
+  };
+
+  /* (1)+(2) action cells fire with the selected node id; distinct cells -> distinct actions. */
+  {
+    int W=80,H=24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *g = flow_new(W, H); flow_register_defaults(g);
+    int a = flow_add_node(g, "default", (flow_pt){10, 8}, (void*)"A");
+    flow_select_node(g, a, 0);
+    flow_set_node_toolbar(g, NT_ACTS, 2);
+    flow_render(g, buf, W, H);
+    int c0x = tbx(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0), c0y = tby(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0);
+    int c1x = tbx(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 1), c1y = tby(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 1);
+    ASSERT(c0x >= 0 && c1x >= 0, "node toolbar cached 2 action rects");
+    g_nt_id = -2; g_nt_idx = -2;
+    press(g, c0x, c0y);
+    ASSERT_INT(g_nt_id, a, "cell 0 fires with the selected node id");
+    ASSERT_INT(g_nt_idx, 0, "cell 0 -> action 0");
+    g_nt_id = -2; g_nt_idx = -2;
+    press(g, c1x, c1y);
+    ASSERT_INT(g_nt_idx, 1, "cell 1 -> action 1 (per-cell x-span mapping)");
+    free(buf); flow_free(g);
+  }
+
+  /* (3) clicks elsewhere FALL THROUGH (the seam consumed ONLY the action cell). */
+  {
+    int W=80,H=24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *g = flow_new(W, H); flow_register_defaults(g);
+    g->cb.on_node_click = nt_onclick;
+    int a = flow_add_node(g, "default", (flow_pt){10, 8}, (void*)"A");
+    flow_select_node(g, a, 0);
+    flow_set_node_toolbar(g, NT_ACTS, 2);
+    flow_render(g, buf, W, H);
+    g_nt_id = -2; g_nclick = 0;
+    flow_pt body = flow_to_screen(g, (flow_pt){11, 9});   /* node interior, NOT the strip row */
+    press(g, body.x, body.y); release(g, body.x, body.y); /* a full click */
+    ASSERT_INT(g_nclick, 1, "body click fell through to on_node_click");
+    ASSERT_INT(g_nt_id, -2, "body click did NOT fire a toolbar action");
+    free(buf); flow_free(g);
+  }
+
+  /* (4) hidden when selection != 1 (the same cell that fired in (1) is inert). */
+  {
+    int W=80,H=24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *g = flow_new(W, H); flow_register_defaults(g);
+    int a = flow_add_node(g, "default", (flow_pt){10, 8}, (void*)"A");
+    int b = flow_add_node(g, "default", (flow_pt){30, 8}, (void*)"B");
+    flow_select_node(g, a, 0);
+    flow_set_node_toolbar(g, NT_ACTS, 2);
+    flow_render(g, buf, W, H);
+    int cx = tbx(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0), cy = tby(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0);
+    ASSERT(cx >= 0, "strip shown for single selection");
+    /* clear selection: strip gone */
+    flow_clear_selection(g);
+    flow_render(g, buf, W, H);
+    g_nt_id = -2; press(g, cx, cy);
+    ASSERT_INT(g_nt_id, -2, "no-selection: that cell is inert");
+    /* multi-select: strip hidden */
+    flow_select_node(g, a, 0); flow_select_node(g, b, 1);
+    ASSERT_INT(flow_selected_count(g), 2, "two selected");
+    flow_render(g, buf, W, H);
+    g_nt_id = -2; press(g, cx, cy);
+    ASSERT_INT(g_nt_id, -2, "multi-select: strip hidden, cell inert");
+    free(buf); flow_free(g);
+  }
+
+  /* (5) fn(id) mutation is realloc-safe (delete the node from within the action). */
+  {
+    int W=80,H=24; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *g = flow_new(W, H); flow_register_defaults(g);
+    flow_add_node(g, "default", (flow_pt){2, 2}, (void*)"keep");
+    int a = flow_add_node(g, "default", (flow_pt){10, 8}, (void*)"A");
+    static const flow_toolbar_action del_acts[] = { { "x", nt_del, NULL } };
+    flow_select_node(g, a, 0);
+    flow_set_node_toolbar(g, del_acts, 1);
+    flow_render(g, buf, W, H);
+    int n0 = flow_node_count(g);
+    int cx = tbx(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0), cy = tby(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0);
+    press(g, cx, cy);
+    ASSERT_INT(flow_node_count(g), n0 - 1, "action deleted the node (realloc-safe, no UAF)");
+    ASSERT_INT(flow_get_node(g, a) == NULL, 1, "deleted node id is gone");
+    free(buf); flow_free(g);
+  }
+
+  /* (6) overlap: a toolbar cell drawn ON TOP of a Controls button must win the hit-test
+     (topmost-rendered == first-hit). Controls TL + a node at world (0,1) puts both on row 0. */
+  {
+    int W=40,H=12; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *g = flow_new(W, H); flow_register_defaults(g);
+    int a = flow_add_node(g, "default", (flow_pt){0, 1}, (void*)"A");   /* strip lands on row 0 */
+    flow_set_controls(g, 1, FLOW_CORNER_TL);                            /* controls also on row 0 */
+    flow_select_node(g, a, 0);
+    flow_set_node_toolbar(g, NT_ACTS, 2);
+    flow_render(g, buf, W, H);
+    int t0x = tbx(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0), t0y = tby(g, FLOW_WIDGET_OWNER_NODE_TOOLBAR, 0);
+    ASSERT_INT(t0y, 0, "toolbar strip on row 0 (overlaps TL controls)");
+    float z0 = flow_zoom(g); g_nt_id = -2;
+    press(g, t0x, t0y);
+    ASSERT_INT(g_nt_id, a, "overlap: press routed to the TOOLBAR (topmost), not controls");
+    ASSERT(flow_zoom(g) == z0, "overlap: controls did NOT fire (no zoom)");
     free(buf); flow_free(g);
   }
 

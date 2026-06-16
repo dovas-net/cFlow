@@ -201,6 +201,47 @@ static void flow__controls(flow_t *f, flow_cellbuf *cb) {
     }
   }
 }
+/* inc-7 #4: display-cell (codepoint) count of a label — flow_text draws one cell each. */
+static int flow__label_cells(const char *s) {
+  int n = 0; if (!s) return 0;
+  while (*s) { uint32_t cp; s += flow_utf8_decode(s, &cp); n++; }
+  return n;
+}
+/* inc-7 #4: the node toolbar — a one-row action strip anchored one row ABOVE the single
+   selected node's footprint (flips below when there's no room), left-aligned to the node
+   and clamped on-screen. Draws each action label and records its rect in the SHARED
+   widgets[] cache (owner NODE_TOOLBAR, action = index) so the press hit-test routes to
+   exactly what's drawn. Constant screen-cell width (only the anchor scales with zoom).
+   Chrome color is theme.widget_fg/bg so it tracks color_mode. */
+static void flow__node_toolbar(flow_t *f, flow_cellbuf *cb) {
+  if (!f->node_toolbar.actions || f->node_toolbar.n <= 0) return;
+  if (flow_selected_count(f) != 1) return;
+  flow_node *n = flow_get_node(f, flow_selected_node(f));
+  if (!n) return;
+  flow_rect fp = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom));
+  int total = 0;                                   /* width = sum(label cells) + (n-1) separators */
+  for (int k = 0; k < f->node_toolbar.n; k++) { total += flow__label_cells(f->node_toolbar.actions[k].label); if (k) total += 1; }
+  if (total <= 0) return;
+  int sx = fp.x, sy = fp.y - 1;                    /* left-align to node, one row above */
+  if (sy < 0) sy = fp.y + fp.h;                    /* no room above: flip below */
+  if (sx + total > cb->w) sx = cb->w - total;      /* clamp on-screen (visible == hittable) */
+  if (sx < 0) sx = 0;
+  flow_surface s = { cb, 0, 0, cb->w, cb->h, 0, 0, cb->w, cb->h };
+  int cx = sx;
+  for (int k = 0; k < f->node_toolbar.n; k++) {
+    const char *label = f->node_toolbar.actions[k].label ? f->node_toolbar.actions[k].label : "";
+    int w = flow__label_cells(label);
+    flow_text(&s, cx, sy, label, f->theme.widget_fg, f->theme.widget_bg, 0);
+    if (w > 0 && f->nwidgets < (int)(sizeof f->widgets / sizeof f->widgets[0])) {
+      f->widgets[f->nwidgets].x = cx; f->widgets[f->nwidgets].y = sy;
+      f->widgets[f->nwidgets].w = w;  f->widgets[f->nwidgets].h = 1;
+      f->widgets[f->nwidgets].owner = FLOW_WIDGET_OWNER_NODE_TOOLBAR;
+      f->widgets[f->nwidgets].action = k;
+      f->nwidgets++;
+    }
+    cx += w + 1;                                   /* label + 1-cell separator */
+  }
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, f->theme.fg, f->theme.bg);
@@ -373,6 +414,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   if (f->minimap.enabled) flow__minimap(f, &cb);
   f->nwidgets = 0;                                   /* inc-7 #3: refill the widget hit-rect cache each frame (controls + #4/#5 toolbars append below) */
   if (f->controls.enabled) flow__controls(f, &cb);
+  flow__node_toolbar(f, &cb);                        /* inc-7 #4: gated internally on actions + single selection */
   if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 
   /* built-in status/help bar: drawn LAST (after the app overlay) on the bottom
