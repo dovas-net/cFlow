@@ -71,6 +71,22 @@ static void flow__autopan(flow_t *f, flow_pt scr) {
   if (2 * m < f->rows) { if (scr.y < m) dy = s; else if (scr.y >= f->rows - m) dy = -s; }
   if (dx || dy) flow_pan(f, dx, dy);
 }
+/* inc-7 #3: dispatch a left-press on widget cache entry `i`. `owner` routes the handler;
+   for Controls, `action` acts on the view/lock. #4/#5 add NODE/EDGE_TOOLBAR cases that
+   resolve the app's action callback against the selected node/edge. */
+static void flow__widget_press(flow_t *f, int i) {
+  switch (f->widgets[i].owner) {
+    case FLOW_WIDGET_OWNER_CONTROLS:
+      switch (f->widgets[i].action) {
+        case FLOW_WIDGET_ZOOM_IN:  flow_zoom_in (f, (flow_pt){ f->cols / 2, f->rows / 2 }); break;
+        case FLOW_WIDGET_ZOOM_OUT: flow_zoom_out(f, (flow_pt){ f->cols / 2, f->rows / 2 }); break;
+        case FLOW_WIDGET_FIT:      flow_fit_view(f, 2); break;
+        case FLOW_WIDGET_LOCK:     f->locked = !f->locked; break;
+      }
+      break;
+    default: break;
+  }
+}
 void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
   if (ev->type == FLOW_MOUSE_WHEEL) {
     if (ev->mods & FLOW_MOD_CTRL) {           /* Ctrl+wheel: pointer-centered zoom (button 0=in,1=out) */
@@ -103,6 +119,30 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       return;
     }
     if (ev->button == 0) {                       /* arm a press; classify on move/release */
+      /* inc-7 #3: WIDGET HIT-TEST — engine chrome (Controls; #4/#5 toolbars) wins the press
+         ABOVE all canvas classification. SCREEN-space: compares scr to cached render rects
+         directly (NO flow_to_world — that wrapper is for world-space graph elements). A hit
+         dispatches and CONSUMES (the handle-grab reset shape, :134-136), so the press never
+         falls through to the conn-resolve, the space-pan arm, the trio, or the release click. */
+      for (int wi = 0; wi < f->nwidgets; wi++) {
+        if (scr.x >= f->widgets[wi].x && scr.x < f->widgets[wi].x + f->widgets[wi].w &&
+            scr.y >= f->widgets[wi].y && scr.y < f->widgets[wi].y + f->widgets[wi].h) {
+          flow__widget_press(f, wi);
+          f->mouse_down = 0; f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+          f->down_modsel = 0; f->marquee_active = 0;
+          return;
+        }
+      }
+      /* inc-7 #3: LOCK — preempt every mutate/select arm in ONE place (handle/reconnect/
+         node-drag/modifier-select/marquee) while KEEPING pan armed: mouse_down stays 1, so the
+         first motion with down_node==-1 routes to the dragging_pan branch (:208). Runs AFTER the
+         widget hit-test so the [lock] button itself stays clickable to unlock. */
+      if (f->locked) {
+        f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+        f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+        f->down_modsel = 0; f->marquee_active = 0;
+        return;
+      }
       /* connectOnClick resolve: a press while already connecting (armed by a prior
          click) completes on a target handle/node — CONSUMED — or cancels, in which
          case the press FALLS THROUGH to normal classification below (inc-5 #11):
@@ -365,7 +405,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           f->last_click_node = f->down_node;
         }
         f->last_click_edge = -1;                 /* a node click breaks the edge dblclick pair */
-      } else {
+      } else if (!f->locked) {                   /* inc-7 #3: a locked no-move click neither edge-selects, clears selection, nor fires on_pane_click */
         int eclick = flow_hit_edge(f, scr, 1);   /* edge-body click-select before clearing/pane-click */
         if (eclick != -1) {
           flow_select_edge(f, eclick, 0);

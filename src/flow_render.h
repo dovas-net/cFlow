@@ -170,6 +170,37 @@ static flow_rect flow__node_clip(flow_t *f, const flow_node *n, int lod, int col
   }
   return clip;
 }
+/* inc-7 #3: the Controls bar — a one-row [+][-][fit][lock] strip drawn in the widget tier
+   (after the minimap, before the app overlay). Each button is a 3-cell [g] group, and the
+   SAME loop records each as a widgets[] hit-rect so the drawn region is exactly the
+   hittable region (the flow__handle_screen render/hit single-source discipline). Chrome
+   color is theme.widget_fg/bg so it tracks color_mode. The lock glyph differs when locked. */
+static void flow__controls(flow_t *f, flow_cellbuf *cb) {
+  enum { NBTN = 4, BW = NBTN * 3 };
+  int ox, oy;
+  switch (f->controls.corner) {
+    case FLOW_CORNER_TL: ox = 0;          oy = 0;          break;
+    case FLOW_CORNER_TR: ox = cb->w - BW; oy = 0;          break;
+    case FLOW_CORNER_BL: ox = 0;          oy = cb->h - 1;  break;
+    default:             ox = cb->w - BW; oy = cb->h - 1;  break;  /* BR */
+  }
+  static const uint32_t icon[NBTN] = { '+', '-', 0x26F6, 0 };  /* ⛶ fit; [3] lock glyph chosen per state */
+  static const int      act[NBTN]  = { FLOW_WIDGET_ZOOM_IN, FLOW_WIDGET_ZOOM_OUT, FLOW_WIDGET_FIT, FLOW_WIDGET_LOCK };
+  for (int k = 0; k < NBTN; k++) {
+    int bx = ox + k * 3;
+    uint32_t g = (k == 3) ? (f->locked ? 0x25CF : 0x25CB) : icon[k];   /* ● locked / ○ unlocked */
+    flow_cellbuf_put(cb, bx,     oy, '[', f->theme.widget_fg, f->theme.widget_bg, 0);
+    flow_cellbuf_put(cb, bx + 1, oy, g,   f->theme.widget_fg, f->theme.widget_bg, 0);
+    flow_cellbuf_put(cb, bx + 2, oy, ']', f->theme.widget_fg, f->theme.widget_bg, 0);
+    if (f->nwidgets < (int)(sizeof f->widgets / sizeof f->widgets[0])) {
+      f->widgets[f->nwidgets].x = bx; f->widgets[f->nwidgets].y = oy;
+      f->widgets[f->nwidgets].w = 3;  f->widgets[f->nwidgets].h = 1;
+      f->widgets[f->nwidgets].owner = FLOW_WIDGET_OWNER_CONTROLS;
+      f->widgets[f->nwidgets].action = act[k];
+      f->nwidgets++;
+    }
+  }
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, f->theme.fg, f->theme.bg);
@@ -340,6 +371,8 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   }
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
+  f->nwidgets = 0;                                   /* inc-7 #3: refill the widget hit-rect cache each frame (controls + #4/#5 toolbars append below) */
+  if (f->controls.enabled) flow__controls(f, &cb);
   if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 
   /* built-in status/help bar: drawn LAST (after the app overlay) on the bottom

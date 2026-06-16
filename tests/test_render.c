@@ -497,6 +497,23 @@ int main(void) {
     free(tb); flow_free(t);
   }
 
+  /* inc-7 #3: Controls bar golden — OFF by default keeps every other golden byte-identical;
+     these new goldens lock the bar glyphs + the locked-state lock glyph. */
+  {
+    int W = 40, H = 12; flow_cell *cbuf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *cf = flow_new(W, H); flow_register_defaults(cf);
+    flow_add_node(cf, "default", (flow_pt){2, 2}, (void*)"A");
+    flow_set_controls(cf, 1, FLOW_CORNER_BL);
+    flow_render(cf, cbuf, W, H);
+    char *cs = cells_to_string(cbuf, W, H);
+    SNAPSHOT("render_controls", cs); free(cs);
+    flow_set_locked(cf, 1);
+    flow_render(cf, cbuf, W, H);
+    char *cls = cells_to_string(cbuf, W, H);
+    SNAPSHOT("render_controls_locked", cls); free(cls);
+    free(cbuf); flow_free(cf);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

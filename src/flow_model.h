@@ -324,6 +324,17 @@ void flow_set_background(flow_t *f, flow_bg_variant variant, int gap);
 void            flow_set_color_mode(flow_t *f, flow_color_mode mode);
 flow_color_mode flow_color_mode_get(flow_t *f);   /* the last mode set (calloc-zero = FLOW_COLOR_DEFAULT) */
 
+/* Controls panel (inc-7 #3) — the first interactive built-in widget: a corner-anchored
+   [+][-][fit][lock] row (reuses flow_corner). Off by default (calloc-zero), like the
+   minimap. Transient chrome: never saved, never journaled. The widget hit-test seam it
+   introduces (top of the left-press classifier) is reused by the node/edge toolbars. */
+void flow_set_controls(flow_t *f, int enabled, flow_corner corner);
+/* Lock mode (inc-7 #3, the [lock] button): a whole-canvas bool. When set, the engine
+   suppresses node-drag/connect/reconnect/marquee/click-select arming; pan and zoom keep
+   working (xyflow Controls-lock). Toggle via the widget or directly. TRANSIENT. */
+void flow_set_locked(flow_t *f, int on);
+int  flow_locked(flow_t *f);
+
 /* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
    xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
    the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
@@ -334,6 +345,12 @@ flow_color_mode flow_color_mode_get(flow_t *f);   /* the last mode set (calloc-z
 void flow_set_helper_lines(flow_t *f, int on);
 
 #ifdef FLOW_IMPLEMENTATION
+/* inc-7 #3: the interactive-widget hit-test seam. A render-filled cache of screen rects
+   (no heap) the left-press classifier scans ABOVE canvas classification; each entry's
+   `owner` selects the provider and `action` keys the handler. Controls is the first
+   provider; node/edge toolbars (#4/#5) push their own rects into the SAME list. */
+enum { FLOW_WIDGET_OWNER_CONTROLS, FLOW_WIDGET_OWNER_NODE_TOOLBAR, FLOW_WIDGET_OWNER_EDGE_TOOLBAR };
+enum { FLOW_WIDGET_ZOOM_IN, FLOW_WIDGET_ZOOM_OUT, FLOW_WIDGET_FIT, FLOW_WIDGET_LOCK };  /* controls actions (owner == CONTROLS) */
 struct flow {
   flow_node *nodes; int nnodes, capnodes, nextid;
   flow_edge *edges; int nedges, capedges, nexteid;
@@ -378,6 +395,9 @@ struct flow {
                                      (calloc-zero would be black-on-black). Transient — never saved/journaled. */
   struct { char seq[8]; flow_key_fn fn; void *user; } keys[32]; int nkeys;  /* key-binding registry */
   int statusbar;  /* built-in bottom help/status line */
+  int locked;     /* inc-7 #3: whole-canvas lock (Controls [lock]) — suppress drag/connect/reconnect/marquee/click-select; pan+zoom still work. Transient: never saved/journaled. */
+  struct { int enabled; flow_corner corner; } controls;  /* inc-7 #3: Controls bar config (off by default; the minimap value-struct precedent) */
+  struct { int x, y, w, h, owner, action; } widgets[16]; int nwidgets;  /* inc-7 #3: render-filled widget hit-rect cache (no heap) — drawn region == hittable region; refilled each frame */
   struct {                                  /* selection clipboard (inc-5 #7): deep snapshots.
                                                node snaps store ABS pos in .node.pos (resolved at
                                                copy time — the source graph may be gone at paste);
@@ -1058,6 +1078,9 @@ void flow_set_color_mode(flow_t *f, flow_color_mode mode) {
   f->color_mode = mode;
 }
 flow_color_mode flow_color_mode_get(flow_t *f) { return f->color_mode; }
+void flow_set_controls(flow_t *f, int enabled, flow_corner corner) { f->controls.enabled = enabled ? 1 : 0; f->controls.corner = corner; }
+void flow_set_locked(flow_t *f, int on) { f->locked = on ? 1 : 0; }
+int  flow_locked(flow_t *f) { return f->locked; }
 int flow_selected_edge(flow_t *f) {
   for (int i = 0; i < f->nedges; i++) if (f->edges[i].flags & FLOW_SELECTED) return f->edges[i].id;
   return -1;
