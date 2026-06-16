@@ -2,6 +2,32 @@
 enum { FLOW_BOLD = 1u, FLOW_REVERSE = 2u, FLOW_DIM = 4u, FLOW_UNDERLINE = 8u };
 #define FLOW_FG 7
 #define FLOW_BG 0
+/* Grid "light" comes from a dim 256-color fg, NOT FLOW_DIM: flow_diff_emit
+   serializes only BOLD/REVERSE attrs but always the ;38;5;<fg> color path, so a
+   DIM-attr grid would look full-intensity on a real terminal. 8 = bright black.
+   Lives here (module 3, ahead of flow_model/flow_render) so flow_new can seed
+   theme.grid_fg from it — relocated from flow_render.h. */
+#define FLOW_BG_GRID_FG 8
+
+/* engine-chrome theme (inc-7 #1): a fixed, minimal token set. Each field is an
+   xterm-256 index (the only color channel flow_diff_emit emits, see :105). NO
+   per-element override table (YAGNI). The DEFAULT preset's values EQUAL the legacy
+   FLOW_FG/FLOW_BG/FLOW_BG_GRID_FG literals, so converting the render call-sites to
+   read f->theme.* is a pure indirection — every existing golden stays byte-identical.
+   Transient view-state: never saved, never journaled. */
+typedef struct {
+  uint8_t fg, bg;               /* canvas foreground / background (clear, edges, handles, ...) */
+  uint8_t grid_fg;              /* background-grid dot/line fg (was FLOW_BG_GRID_FG) */
+  uint8_t handle;               /* handle marker color (== fg in every preset for now) */
+  uint8_t handle_valid;         /* DEFINED here, CONSUMED by pkg2 connect-feedback (green) */
+  uint8_t handle_invalid;       /* DEFINED here, CONSUMED by pkg2 connect-feedback (red) */
+  uint8_t accent;               /* selection/bold accent — DEFINED, left UNWIRED this increment */
+  uint8_t edge_fg;              /* edge path fg (== fg in every preset for now) */
+  uint8_t widget_fg, widget_bg; /* DEFINED here, CONSUMED by pkg3-5 controls/toolbars chrome */
+} flow_theme;
+
+typedef enum { FLOW_COLOR_DEFAULT, FLOW_COLOR_LIGHT, FLOW_COLOR_DARK } flow_color_mode;
+
 typedef struct { uint32_t ch; uint8_t fg, bg, attr; } flow_cell;
 
 typedef struct { flow_cell *cells; int w, h; } flow_cellbuf;

@@ -400,6 +400,103 @@ int main(void) {
     free(amb); flow_free(am);
   }
 
+  /* ===== inc-7 #1: theme tokens + colorMode presets ===== */
+  /* (1) a new graph defaults to FLOW_COLOR_DEFAULT == today's literals 7/0/8. */
+  {
+    flow_t *t = flow_new(30, 8); flow_register_defaults(t);
+    flow_add_node(t, "default", (flow_pt){0, 0}, (void*)"A");
+    ASSERT_INT(flow_color_mode_get(t), FLOW_COLOR_DEFAULT, "new graph defaults to FLOW_COLOR_DEFAULT");
+    ASSERT_INT(t->theme.fg, 7, "default theme fg == legacy FLOW_FG");
+    ASSERT_INT(t->theme.bg, 0, "default theme bg == legacy FLOW_BG");
+    ASSERT_INT(t->theme.grid_fg, 8, "default theme grid_fg == legacy FLOW_BG_GRID_FG");
+    flow_free(t);
+  }
+
+  /* (2) a colorMode swap moves the documented chrome cells' .fg/.bg — the
+     cell-field discriminator. cells_to_string captures ONLY .ch, so a color swap
+     is snapshot-invisible; assert the raw color bytes. Scene exercises distinct
+     chrome layers (canvas clear / grid dot / statusbar). */
+  {
+    int tc = 30, tr = 8;
+    flow_cell *tb = (flow_cell*)malloc((size_t)tc * tr * sizeof(flow_cell));
+    flow_t *t = flow_new(tc, tr); flow_register_defaults(t);
+    flow_add_node(t, "default", (flow_pt){0, 0}, (void*)"A");   /* 5x3 box at screen (0,0) */
+    flow_set_background(t, FLOW_BG_DOTS, 4);
+    flow_set_minimap(t, 1, FLOW_CORNER_BR, 8, 5);
+    flow_set_statusbar(t, 1);
+    /* witnesses: canvas-clear (10,1) [not grid, not node, not minimap], grid dot
+       (8,0), statusbar row (2,7). */
+    int CAN = 1*tc + 10, GRID = 0*tc + 8, SB = 7*tc + 2;
+
+    flow_render(t, tb, tc, tr);
+    ASSERT_INT(tb[CAN].ch, ' ', "witness canvas cell is blank");
+    ASSERT_INT(tb[CAN].fg, 7, "DEFAULT canvas fg 7"); ASSERT_INT(tb[CAN].bg, 0, "DEFAULT canvas bg 0");
+    ASSERT_INT(tb[GRID].ch, 0x00B7, "witness grid cell is a dot");
+    ASSERT_INT(tb[GRID].fg, 8, "DEFAULT grid fg 8"); ASSERT_INT(tb[GRID].bg, 0, "DEFAULT grid bg 0");
+    ASSERT_INT(tb[SB].fg, 7, "DEFAULT statusbar fg 7"); ASSERT_INT(tb[SB].bg, 0, "DEFAULT statusbar bg 0");
+
+    /* LIGHT: bg flips light (15), fg goes dark (0); grid_fg -> 7. The bg flip is
+       the headline — an fg-only nudge would be the weakest signal for colorMode. */
+    flow_set_color_mode(t, FLOW_COLOR_LIGHT);
+    flow_render(t, tb, tc, tr);
+    ASSERT_INT(flow_color_mode_get(t), FLOW_COLOR_LIGHT, "mode is LIGHT");
+    ASSERT_INT(tb[CAN].bg, 15, "LIGHT canvas bg flips to 15");
+    ASSERT_INT(tb[CAN].fg, 0, "LIGHT canvas fg -> 0");
+    ASSERT_INT(tb[CAN].ch, ' ', "LIGHT swap is color-only (canvas glyph unchanged)");
+    ASSERT_INT(tb[GRID].bg, 15, "LIGHT grid bg flips to 15");
+    ASSERT_INT(tb[GRID].fg, 7, "LIGHT grid fg -> 7");
+    ASSERT_INT(tb[GRID].ch, 0x00B7, "LIGHT grid glyph unchanged");
+    ASSERT_INT(tb[SB].bg, 15, "LIGHT statusbar bg flips to 15");
+
+    /* DARK: bg stays dark (0), fg brightens (15) — distinct from LIGHT in bg. */
+    flow_set_color_mode(t, FLOW_COLOR_DARK);
+    flow_render(t, tb, tc, tr);
+    ASSERT_INT(flow_color_mode_get(t), FLOW_COLOR_DARK, "mode is DARK");
+    ASSERT_INT(tb[CAN].bg, 0, "DARK canvas bg stays 0");
+    ASSERT_INT(tb[CAN].fg, 15, "DARK canvas fg brightens to 15");
+    ASSERT_INT(tb[CAN].ch, ' ', "DARK swap is color-only (canvas glyph unchanged)");
+
+    /* (3) DEFAULT round-trip is byte-identical — the contract that keeps goldens safe. */
+    flow_set_color_mode(t, FLOW_COLOR_DEFAULT);
+    flow_render(t, tb, tc, tr);
+    ASSERT_INT(tb[CAN].fg, 7, "round-trip canvas fg back to 7"); ASSERT_INT(tb[CAN].bg, 0, "round-trip canvas bg back to 0");
+    ASSERT_INT(tb[GRID].fg, 8, "round-trip grid fg back to 8"); ASSERT_INT(tb[GRID].bg, 0, "round-trip grid bg back to 0");
+    ASSERT_INT(tb[SB].fg, 7, "round-trip statusbar fg back to 7"); ASSERT_INT(tb[SB].bg, 0, "round-trip statusbar bg back to 0");
+
+    /* (4) node-body color is theme-INDEPENDENT (CLASS B node renderers are NOT
+       themed). The node box corner at (0,0) is drawn by flow__default_render via
+       FLOW_FG/FLOW_BG and must not move across a theme swap. */
+    int NB = 0*tc + 0;
+    ASSERT_INT(tb[NB].ch, 0x250C, "node box corner at (0,0)");
+    uint8_t nb_fg = tb[NB].fg, nb_bg = tb[NB].bg;
+    flow_set_color_mode(t, FLOW_COLOR_DARK);
+    flow_render(t, tb, tc, tr);
+    ASSERT_INT(tb[NB].fg, nb_fg, "node-body fg unchanged across theme swap (CLASS B)");
+    ASSERT_INT(tb[NB].bg, nb_bg, "node-body bg unchanged across theme swap (CLASS B)");
+
+    free(tb); flow_free(t);
+  }
+
+  /* (5) handle_valid/handle_invalid/widget_fg/widget_bg are seeded but inert this
+     package; the rendered handle ◉ still uses theme.handle (== fg) at DEFAULT. */
+  {
+    int tc = 30, tr = 8;
+    flow_cell *tb = (flow_cell*)malloc((size_t)tc * tr * sizeof(flow_cell));
+    flow_t *t = flow_new(tc, tr); flow_register_defaults(t);
+    ASSERT_INT(t->theme.handle_valid, 2, "default handle_valid seeded (green, pkg2)");
+    ASSERT_INT(t->theme.handle_invalid, 1, "default handle_invalid seeded (red, pkg2)");
+    ASSERT_INT(t->theme.widget_fg, 7, "default widget_fg seeded (pkg3-5)");
+    ASSERT_INT(t->theme.widget_bg, 0, "default widget_bg seeded (pkg3-5)");
+    int id = flow_add_node(t, "default", (flow_pt){2, 2}, (void*)"A");
+    flow_select_node(t, id, 0);   /* a selected node reveals its handle markers */
+    flow_render(t, tb, tc, tr);
+    int found = -1;
+    for (int i = 0; i < tc * tr; i++) if (tb[i].ch == 0x25C9) { found = i; break; }
+    ASSERT(found >= 0, "selected node renders a handle marker");
+    if (found >= 0) ASSERT_INT(tb[found].fg, t->theme.handle, "handle marker uses theme.handle (== fg) at DEFAULT");
+    free(tb); flow_free(t);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

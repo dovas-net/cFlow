@@ -314,6 +314,15 @@ void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h);
 typedef enum { FLOW_BG_NONE, FLOW_BG_DOTS, FLOW_BG_LINES, FLOW_BG_CROSS } flow_bg_variant;
 void flow_set_background(flow_t *f, flow_bg_variant variant, int gap);
 
+/* engine-chrome color mode (inc-7 #1). flow_set_color_mode re-seeds f->theme from a
+   fixed preset table: FLOW_COLOR_DEFAULT == flow_new's seed == the legacy literals
+   (fg 7 / bg 0 / grid 8), so a round-trip to DEFAULT is byte-identical; LIGHT flips
+   the background to a light index, DARK keeps a dark bg with a brighter fg. The
+   flow_theme token struct + flow_color_mode enum live in flow_cell.h (module 3, ahead
+   of every consumer). Transient view-state: never saved, never journaled. */
+void            flow_set_color_mode(flow_t *f, flow_color_mode mode);
+flow_color_mode flow_color_mode_get(flow_t *f);   /* the last mode set (calloc-zero = FLOW_COLOR_DEFAULT) */
+
 /* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
    xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
    the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
@@ -362,6 +371,9 @@ struct flow {
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
   struct { flow_bg_variant variant; int gap; } bg;
+  flow_theme theme; flow_color_mode color_mode;  /* inc-7 #1: engine-chrome tokens + active preset.
+                                     Value member (no heap), seeded to the DEFAULT preset in flow_new
+                                     (calloc-zero would be black-on-black). Transient — never saved/journaled. */
   struct { char seq[8]; flow_key_fn fn; void *user; } keys[32]; int nkeys;  /* key-binding registry */
   int statusbar;  /* built-in bottom help/status line */
   struct {                                  /* selection clipboard (inc-5 #7): deep snapshots.
@@ -554,6 +566,7 @@ flow_t *flow_new(int cols, int rows) {
   f->reconnect_edge = -1; f->last_click_node = -1; f->last_click_edge = -1;
   f->autopan_margin = 3; f->autopan_speed = 2;
   f->tick_ms = 100;                                            /* inc-6 #4: 10 Hz redraw when armed; tick stays calloc-zero */
+  flow_set_color_mode(f, FLOW_COLOR_DEFAULT);                  /* inc-7 #1: seed the legacy 7/0/8 preset (calloc-zero would be black-on-black) */
   f->journal.limit = 128; f->journal.txn_base = -1;
   f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
   return f;
@@ -1001,6 +1014,23 @@ void flow_set_minimap(flow_t *f, int enabled, flow_corner corner, int w, int h) 
 void flow_set_background(flow_t *f, flow_bg_variant variant, int gap) {
   f->bg.variant = variant; f->bg.gap = gap < 1 ? 1 : gap;  /* gap>=1 clamp: no modulo-by-zero */
 }
+/* inc-7 #1: re-seed f->theme from a fixed preset table. Designated array AND struct
+   initializers so neither an enum reorder nor a flow_theme field reorder can silently
+   corrupt a preset. DEFAULT == flow_new's seed == the legacy literals (round-trip
+   byte-identical); LIGHT flips bg to a light index with a dark fg; DARK keeps the dark
+   canvas with a brighter fg. handle_valid/handle_invalid (pkg2 green/red) and
+   widget_fg/widget_bg (pkg3-5 chrome == canvas) are constant across presets for now. */
+void flow_set_color_mode(flow_t *f, flow_color_mode mode) {
+  static const flow_theme presets[] = {
+    [FLOW_COLOR_DEFAULT] = { .fg = 7,  .bg = 0,  .grid_fg = 8, .handle = 7,  .handle_valid = 2, .handle_invalid = 1, .accent = 7,  .edge_fg = 7,  .widget_fg = 7,  .widget_bg = 0  },
+    [FLOW_COLOR_LIGHT]   = { .fg = 0,  .bg = 15, .grid_fg = 7, .handle = 0,  .handle_valid = 2, .handle_invalid = 1, .accent = 0,  .edge_fg = 0,  .widget_fg = 0,  .widget_bg = 15 },
+    [FLOW_COLOR_DARK]    = { .fg = 15, .bg = 0,  .grid_fg = 8, .handle = 15, .handle_valid = 2, .handle_invalid = 1, .accent = 15, .edge_fg = 15, .widget_fg = 15, .widget_bg = 0  },
+  };
+  if (mode < FLOW_COLOR_DEFAULT || mode > FLOW_COLOR_DARK) mode = FLOW_COLOR_DEFAULT;
+  f->theme = presets[mode];
+  f->color_mode = mode;
+}
+flow_color_mode flow_color_mode_get(flow_t *f) { return f->color_mode; }
 int flow_selected_edge(flow_t *f) {
   for (int i = 0; i < f->nedges; i++) if (f->edges[i].flags & FLOW_SELECTED) return f->edges[i].id;
   return -1;

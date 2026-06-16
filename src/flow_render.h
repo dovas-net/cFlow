@@ -2,10 +2,8 @@
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows);
 
 #ifdef FLOW_IMPLEMENTATION
-/* Grid "light" comes from a dim 256-color fg, NOT FLOW_DIM: flow_diff_emit
-   serializes only BOLD/REVERSE attrs but always the ;38;5;<fg> color path, so a
-   DIM-attr grid would look full-intensity on a real terminal. 8 = bright black. */
-#define FLOW_BG_GRID_FG 8
+/* FLOW_BG_GRID_FG (the grid's dim fg) relocated to flow_cell.h so flow_new can
+   seed theme.grid_fg from it; the grid put below now reads f->theme.grid_fg. */
 /* inc-6 #5 marching-ants: an animated edge's path cell is LIT when (cell_index + tick) %
    FLOW_DASH_PERIOD == 0 (every-other cell — the cadence the connection preview proves reads
    at TUI granularity); off-phase cells are skipped. Named so a longer ant pattern is a one-
@@ -27,7 +25,7 @@ static void flow__background(flow_t *f, flow_cellbuf *cb) {
         break;
       default: break;
     }
-    if (ch) flow_cellbuf_put(cb, sx, sy, ch, FLOW_BG_GRID_FG, FLOW_BG, 0);
+    if (ch) flow_cellbuf_put(cb, sx, sy, ch, f->theme.grid_fg, f->theme.bg, 0);
   }
 }
 static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
@@ -41,12 +39,12 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
     default:             ox = cb->w - bw; oy = cb->h - bh; break;  /* BR */
   }
   flow_surface s = { cb, ox, oy, bw, bh, 0, 0, cb->w, cb->h };  /* full-buffer clip (no extra clip) */
-  flow_box(&s, 0, 0, bw, bh, FLOW_FG, FLOW_BG, 0);
+  flow_box(&s, 0, 0, bw, bh, f->theme.fg, f->theme.bg, 0);
   /* opaque panel: blank the interior so the background grid / edges / nodes
      underneath don't bleed through (flow_box strokes the border only) */
   for (int yy = 1; yy < bh - 1; yy++)
     for (int xx = 1; xx < bw - 1; xx++)
-      flow_put(&s, xx, yy, ' ', FLOW_FG, FLOW_BG, 0);
+      flow_put(&s, xx, yy, ' ', f->theme.fg, f->theme.bg, 0);
   int iw = bw - 2, ih = bh - 2;
   /* world window encompasses all nodes and the current screen rect. Project BOTH
      screen corners so the world viewport size is zoom-correct (at zoom==1 this
@@ -65,8 +63,8 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
   int vx2 = (vp.x + vp.w - 1 - W.x) * iw / W.w,  vy2 = (vp.y + vp.h - 1 - W.y) * ih / W.h;
   if (vx < 0) vx = 0; if (vy < 0) vy = 0;
   if (vx2 > iw - 1) vx2 = iw - 1; if (vy2 > ih - 1) vy2 = ih - 1;
-  for (int x = vx; x <= vx2; x++) { flow_put(&s, 1+x, 1+vy, 0x2500, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+x, 1+vy2, 0x2500, FLOW_FG, FLOW_BG, 0); }
-  for (int y = vy; y <= vy2; y++) { flow_put(&s, 1+vx, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); flow_put(&s, 1+vx2, 1+y, 0x2502, FLOW_FG, FLOW_BG, 0); }
+  for (int x = vx; x <= vx2; x++) { flow_put(&s, 1+x, 1+vy, 0x2500, f->theme.fg, f->theme.bg, 0); flow_put(&s, 1+x, 1+vy2, 0x2500, f->theme.fg, f->theme.bg, 0); }
+  for (int y = vy; y <= vy2; y++) { flow_put(&s, 1+vx, 1+y, 0x2502, f->theme.fg, f->theme.bg, 0); flow_put(&s, 1+vx2, 1+y, 0x2502, f->theme.fg, f->theme.bg, 0); }
   for (int i = 0; i < f->nnodes; i++) {
     flow_node *n = &f->nodes[i];
     if (!flow__node_visible(f, n)) continue;     /* hidden nodes get no minimap dot */
@@ -76,7 +74,7 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
     if (mx < 0) mx = 0; if (mx > iw - 1) mx = iw - 1;
     if (my < 0) my = 0; if (my > ih - 1) my = ih - 1;
     int sel = n->flags & FLOW_SELECTED;
-    flow_put(&s, 1+mx, 1+my, sel ? 0x25C9 : 0x2022, FLOW_FG, FLOW_BG, sel ? FLOW_BOLD : 0);  /* ◉ / • */
+    flow_put(&s, 1+mx, 1+my, sel ? 0x25C9 : 0x2022, f->theme.fg, f->theme.bg, sel ? FLOW_BOLD : 0);  /* ◉ / • */
   }
 }
 /* nudge a (world) anchor one cell OUTSIDE the node along the handle's facing */
@@ -174,7 +172,7 @@ static flow_rect flow__node_clip(flow_t *f, const flow_node *n, int lod, int col
 }
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
-  flow_cellbuf_clear(&cb, FLOW_FG, FLOW_BG);
+  flow_cellbuf_clear(&cb, f->theme.fg, f->theme.bg);
 
   /* background grid first (under edges/nodes, so it scrolls with pan) */
   if (f->bg.variant != FLOW_BG_NONE) flow__background(f, &cb);
@@ -196,12 +194,12 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     for (int c = 0; c < rt.count; c++) {
       if (animated && c < rt.count - 1 && ((c + f->tick) % FLOW_DASH_PERIOD) != 0)
         continue;                                               /* off-phase path cell: skip (gap shows backdrop). Arrowhead c==count-1 is exempt → always solid. */
-      flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, attr);
+      flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, f->theme.edge_fg, f->theme.bg, attr);
     }
     if (e->label) {                                            /* label on top of the path at the router anchor (screen coords), clipped */
       const char *u = e->label; int gx = rt.label_anchor.x;
       while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n;
-        flow_cellbuf_put(&cb, gx++, rt.label_anchor.y, cp, FLOW_FG, FLOW_BG, attr); }
+        flow_cellbuf_put(&cb, gx++, rt.label_anchor.y, cp, f->theme.edge_fg, f->theme.bg, attr); }
     }
     free(rt.cells);
   }
@@ -251,7 +249,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       flow_pt s = flow__handle_screen(f, n, h);         /* same projection as flow_hit_handle */
       unsigned bold = (n->id == f->conn_node && h &&
                        strncmp(h->id, f->conn_handle, sizeof h->id) == 0) ? FLOW_BOLD : 0;
-      flow_cellbuf_put(&cb, s.x, s.y, 0x25C9, FLOW_FG, FLOW_BG, bold);  /* ◉ */
+      flow_cellbuf_put(&cb, s.x, s.y, 0x25C9, f->theme.handle, f->theme.bg, bold);  /* ◉ */
     }
   }
 
@@ -291,7 +289,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       int last = rt.count - 1;
       for (int c = 0; c < last; c++)
         if (((rt.cells[c].x + rt.cells[c].y) & 1) == 0)        /* dashed: every other cell */
-          flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, FLOW_FG, FLOW_BG, 0);
+          flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, f->theme.edge_fg, f->theme.bg, 0);
       free(rt.cells);
     }
   }
@@ -308,12 +306,12 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     if (x1 < x0) { int t = x0; x0 = x1; x1 = t; }
     if (y1 < y0) { int t = y0; y0 = y1; y1 = t; }
     for (int x = x0; x <= x1; x++) {                       /* horizontal edges */
-      flow_cellbuf_put(&cb, x, y0, 0x2592, FLOW_FG, FLOW_BG, 0);  /* ▒ */
-      flow_cellbuf_put(&cb, x, y1, 0x2592, FLOW_FG, FLOW_BG, 0);
+      flow_cellbuf_put(&cb, x, y0, 0x2592, f->theme.fg, f->theme.bg, 0);  /* ▒ */
+      flow_cellbuf_put(&cb, x, y1, 0x2592, f->theme.fg, f->theme.bg, 0);
     }
     for (int y = y0; y <= y1; y++) {                       /* vertical edges */
-      flow_cellbuf_put(&cb, x0, y, 0x2592, FLOW_FG, FLOW_BG, 0);
-      flow_cellbuf_put(&cb, x1, y, 0x2592, FLOW_FG, FLOW_BG, 0);
+      flow_cellbuf_put(&cb, x0, y, 0x2592, f->theme.fg, f->theme.bg, 0);
+      flow_cellbuf_put(&cb, x1, y, 0x2592, f->theme.fg, f->theme.bg, 0);
     }
   }
 
@@ -325,12 +323,12 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   for (int g = 0; g < f->helper.nvert; g++) {
     int sx = flow_to_screen(f, (flow_pt){ f->helper.vert[g], 0 }).x;
     if (sx < 0 || sx >= cols) continue;
-    for (int y = 0; y < rows; y++) flow_cellbuf_put(&cb, sx, y, 0x254E, FLOW_FG, FLOW_BG, 0);
+    for (int y = 0; y < rows; y++) flow_cellbuf_put(&cb, sx, y, 0x254E, f->theme.fg, f->theme.bg, 0);
   }
   for (int g = 0; g < f->helper.nhorz; g++) {
     int sy = flow_to_screen(f, (flow_pt){ 0, f->helper.horz[g] }).y;
     if (sy < 0 || sy >= rows) continue;
-    for (int x = 0; x < cols; x++) flow_cellbuf_put(&cb, x, sy, 0x254C, FLOW_FG, FLOW_BG, 0);
+    for (int x = 0; x < cols; x++) flow_cellbuf_put(&cb, x, sy, 0x254C, f->theme.fg, f->theme.bg, 0);
   }
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
@@ -340,7 +338,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
      row only, so it never fights the app's overlay on other rows. */
   if (f->statusbar && rows > 0) {
     flow_surface s = { &cb, 0, rows - 1, cols, 1, 0, 0, cols, rows };  /* full-buffer clip */
-    for (int x = 0; x < cols; x++) flow_put(&s, x, 0, ' ', FLOW_FG, FLOW_BG, FLOW_REVERSE);
+    for (int x = 0; x < cols; x++) flow_put(&s, x, 0, ' ', f->theme.fg, f->theme.bg, FLOW_REVERSE);
     /* While space-pan is armed the bar becomes a mode indicator. The normal help
        line APPENDS the newer hints past column 30: the render_statusbar golden is
        rendered at cols=30 and locks only the " n:add ... ?:help" prefix — editing
@@ -348,7 +346,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     flow_text(&s, 0, 0, f->space_held
               ? " PAN  drag:pan  Space/Esc:exit "
               : " n:add  x:del  f:fit  ?:help  q:quit  SPC:pan  u:undo  ^r:redo  Tab:focus ",
-              FLOW_FG, FLOW_BG, FLOW_REVERSE);
+              f->theme.fg, f->theme.bg, FLOW_REVERSE);
   }
 }
 #endif
