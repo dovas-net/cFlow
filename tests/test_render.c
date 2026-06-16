@@ -529,6 +529,25 @@ int main(void) {
     free(tbuf); flow_free(tf);
   }
 
+  /* inc-7 #5: edge toolbar golden — a selected edge with a ✕ button above the route
+     midpoint. OFF by default keeps every existing golden byte-identical. */
+  {
+    int W = 30, H = 9; flow_cell *ebuf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *ef = flow_new(W, H); flow_register_defaults(ef);
+    int a = flow_add_node(ef, "default", (flow_pt){0, 3},  (void*)"A");
+    int b = flow_add_node(ef, "default", (flow_pt){20, 3}, (void*)"B");
+    int e = flow_add_edge(ef, a, b, "out", "in");
+    static const flow_toolbar_action acts[] = { { "\xe2\x9c\x95", NULL, NULL } };  /* ✕ */
+    flow_set_edge_toolbar(ef, acts, 1);
+    flow_select_edge(ef, e, 0);
+    flow_render(ef, ebuf, W, H);
+    char *s = cells_to_string(ebuf, W, H);
+    SNAPSHOT("render_edge_toolbar", s);
+    ASSERT(strstr(s, "\xe2\x9c\x95") != NULL, "edge toolbar golden shows the ✕ button");
+    free(s);
+    free(ebuf); flow_free(ef);
+  }
+
   free(buf);
   return flowtest_report("test_render");
 }

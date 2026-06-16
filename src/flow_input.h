@@ -92,6 +92,14 @@ static void flow__widget_press(flow_t *f, int i) {
       }
       break;
     }
+    case FLOW_WIDGET_OWNER_EDGE_TOOLBAR: {       /* inc-7 #5: fire the action on the selected edge */
+      int idx = f->widgets[i].action;
+      if (idx >= 0 && idx < f->edge_toolbar.n) {
+        flow_toolbar_action a = f->edge_toolbar.actions[idx];  /* copy BEFORE fn (may remove the edge) */
+        if (a.fn) a.fn(f, flow_selected_edge(f), a.user);      /* the selected edge id */
+      }
+      break;
+    }
     default: break;
   }
 }

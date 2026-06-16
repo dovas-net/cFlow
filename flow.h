@@ -547,6 +547,12 @@ typedef struct {
    BORROWED array; NULL/0 disarms. Transient chrome: never saved, never journaled. */
 void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n);
 
+/* Edge toolbar (inc-7 #5): a floating action bar on the single selected edge, anchored one
+   row above the route midpoint (recomputed each frame so it tracks the wire). Reuses the
+   shared flow_toolbar_action (its `id` is the selected edge id) and the controls-bar seam.
+   BORROWED array; NULL/0 disarms. Transient chrome: never saved, never journaled. */
+void flow_set_edge_toolbar(flow_t *f, const flow_toolbar_action *actions, int n);
+
 /* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
    xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
    the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
@@ -610,6 +616,7 @@ struct flow {
   int locked;     /* inc-7 #3: whole-canvas lock (Controls [lock]) — suppress drag/connect/reconnect/marquee/click-select; pan+zoom still work. Transient: never saved/journaled. */
   struct { int enabled; flow_corner corner; } controls;  /* inc-7 #3: Controls bar config (off by default; the minimap value-struct precedent) */
   struct { const flow_toolbar_action *actions; int n; } node_toolbar;  /* inc-7 #4: borrowed action array ({NULL,0}=off) */
+  struct { const flow_toolbar_action *actions; int n; } edge_toolbar;  /* inc-7 #5: borrowed action array ({NULL,0}=off) */
   struct { int x, y, w, h, owner, action; } widgets[16]; int nwidgets;  /* inc-7 #3: render-filled widget hit-rect cache (no heap) — drawn region == hittable region; refilled each frame */
   struct {                                  /* selection clipboard (inc-5 #7): deep snapshots.
                                                node snaps store ABS pos in .node.pos (resolved at
@@ -1295,6 +1302,7 @@ void flow_set_controls(flow_t *f, int enabled, flow_corner corner) { f->controls
 void flow_set_locked(flow_t *f, int on) { f->locked = on ? 1 : 0; }
 int  flow_locked(flow_t *f) { return f->locked; }
 void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->node_toolbar.actions = actions; f->node_toolbar.n = n; }
+void flow_set_edge_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->edge_toolbar.actions = actions; f->edge_toolbar.n = n; }
 int flow_selected_edge(flow_t *f) {
   for (int i = 0; i < f->nedges; i++) if (f->edges[i].flags & FLOW_SELECTED) return f->edges[i].id;
   return -1;
@@ -2956,6 +2964,49 @@ static void flow__node_toolbar(flow_t *f, flow_cellbuf *cb) {
     cx += w + 1;                                   /* label + 1-cell separator */
   }
 }
+/* inc-7 #5: the edge toolbar — a floating action bar on the single selected edge, anchored
+   one row ABOVE the route midpoint. The route is NOT stored on the edge, so recompute it for
+   the selected edge EXACTLY as the edge draw loop does (shared screen-ends + route vtable),
+   read label_anchor (screen coords), and free immediately so no later return leaks. Records
+   cells in the shared widgets[] cache (owner EDGE_TOOLBAR). Mutually exclusive with the node
+   toolbar by the selection model (no arbitration). Chrome color tracks color_mode. */
+static void flow__edge_toolbar(flow_t *f, flow_cellbuf *cb) {
+  if (!f->edge_toolbar.actions || f->edge_toolbar.n <= 0) return;
+  int eid = flow_selected_edge(f);
+  if (eid == -1) return;
+  flow_edge *e = flow_get_edge(f, eid);
+  if (!e || !flow__edge_visible(f, e)) return;
+  flow_pt ss, ts; flow_pos sp, tp;
+  if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) return;
+  const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
+  if (!et) et = &flow_default_edge_type;
+  flow_route rt = {0};
+  et->route(ss, sp, ts, tp, &rt);
+  flow_pt anchor = rt.label_anchor;
+  free(rt.cells);                                   /* anchor copied out; every later return is leak-free */
+  int total = 0;
+  for (int k = 0; k < f->edge_toolbar.n; k++) { total += flow__label_cells(f->edge_toolbar.actions[k].label); if (k) total += 1; }
+  if (total <= 0) return;
+  int sx = anchor.x, sy = anchor.y - 1;             /* one row ABOVE the midpoint (wire stays visible) */
+  if (sy < 0) sy = 0;                                /* clamp to row 0 rather than off-buffer */
+  if (sx + total > cb->w) sx = cb->w - total;
+  if (sx < 0) sx = 0;
+  flow_surface s = { cb, 0, 0, cb->w, cb->h, 0, 0, cb->w, cb->h };
+  int cx = sx;
+  for (int k = 0; k < f->edge_toolbar.n; k++) {
+    const char *label = f->edge_toolbar.actions[k].label ? f->edge_toolbar.actions[k].label : "";
+    int w = flow__label_cells(label);
+    flow_text(&s, cx, sy, label, f->theme.widget_fg, f->theme.widget_bg, 0);
+    if (w > 0 && f->nwidgets < (int)(sizeof f->widgets / sizeof f->widgets[0])) {
+      f->widgets[f->nwidgets].x = cx; f->widgets[f->nwidgets].y = sy;
+      f->widgets[f->nwidgets].w = w; f->widgets[f->nwidgets].h = 1;
+      f->widgets[f->nwidgets].owner = FLOW_WIDGET_OWNER_EDGE_TOOLBAR;
+      f->widgets[f->nwidgets].action = k;
+      f->nwidgets++;
+    }
+    cx += w + 1;
+  }
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, f->theme.fg, f->theme.bg);
@@ -3129,6 +3180,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   f->nwidgets = 0;                                   /* inc-7 #3: refill the widget hit-rect cache each frame (controls + #4/#5 toolbars append below) */
   if (f->controls.enabled) flow__controls(f, &cb);
   flow__node_toolbar(f, &cb);                        /* inc-7 #4: gated internally on actions + single selection */
+  flow__edge_toolbar(f, &cb);                        /* inc-7 #5: gated on actions + a selected edge (exclusive with node toolbar) */
   if (f->cb.on_overlay) { flow_surface ov = { &cb, 0, 0, cols, rows, 0, 0, cols, rows }; f->cb.on_overlay(f, &ov, f->cb.user); }
 
   /* built-in status/help bar: drawn LAST (after the app overlay) on the bottom
@@ -3644,6 +3696,14 @@ static void flow__widget_press(flow_t *f, int i) {
       if (idx >= 0 && idx < f->node_toolbar.n) {
         flow_toolbar_action a = f->node_toolbar.actions[idx];  /* copy BEFORE fn (may delete the node / swap the array) */
         if (a.fn) a.fn(f, flow_selected_node(f), a.user);      /* pass the id, never a node pointer (realloc-safe) */
+      }
+      break;
+    }
+    case FLOW_WIDGET_OWNER_EDGE_TOOLBAR: {       /* inc-7 #5: fire the action on the selected edge */
+      int idx = f->widgets[i].action;
+      if (idx >= 0 && idx < f->edge_toolbar.n) {
+        flow_toolbar_action a = f->edge_toolbar.actions[idx];  /* copy BEFORE fn (may remove the edge) */
+        if (a.fn) a.fn(f, flow_selected_edge(f), a.user);      /* the selected edge id */
       }
       break;
     }

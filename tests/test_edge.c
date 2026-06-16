@@ -19,6 +19,20 @@ static int vc_conn_fires = 0, vc_end_fires = 0, vc_end_eid = -2, vc_end_tgt = -2
 static void vc_on_conn(flow_t *f, int s, int t, void *u) { (void)f;(void)s;(void)t;(void)u; vc_conn_fires++; }
 static void vc_on_cend(flow_t *f, int eid, int src, int tgt, void *u) { (void)f;(void)src;(void)u; vc_end_fires++; vc_end_eid = eid; vc_end_tgt = tgt; }
 
+/* inc-7 #5 edge-toolbar fixtures */
+static int g_et_id = -2, g_et_fires = 0;
+static void et_cap(flow_t *f, int id, void *u) { (void)f;(void)u; g_et_id = id; g_et_fires++; }
+static void et_del(flow_t *f, int id, void *u) { (void)u; flow_remove_edge(f, id); }
+static int g_eclick = 0, g_epane = 0;
+static void et_onclick(flow_t *f, int edge, void *u) { (void)f;(void)edge;(void)u; g_eclick++; }
+static void et_onpane(flow_t *f, flow_pt w, void *u) { (void)f;(void)w;(void)u; g_epane++; }
+static void et_press(flow_t *f, int cx, int cy)   { char b[40]; int n = snprintf(b, sizeof b, "\x1b[<0;%d;%dM", cx+1, cy+1); flow_feed(f, b, n); }
+static void et_release(flow_t *f, int cx, int cy) { char b[40]; int n = snprintf(b, sizeof b, "\x1b[<0;%d;%dm", cx+1, cy+1); flow_feed(f, b, n); }
+static int etx(flow_t *f, int action) { for (int i=0;i<f->nwidgets;i++) if (f->widgets[i].owner==FLOW_WIDGET_OWNER_EDGE_TOOLBAR && f->widgets[i].action==action) return f->widgets[i].x; return -1; }
+static int ety(flow_t *f, int action) { for (int i=0;i<f->nwidgets;i++) if (f->widgets[i].owner==FLOW_WIDGET_OWNER_EDGE_TOOLBAR && f->widgets[i].action==action) return f->widgets[i].y; return -1; }
+static int et_count(flow_t *f) { int c=0; for (int i=0;i<f->nwidgets;i++) if (f->widgets[i].owner==FLOW_WIDGET_OWNER_EDGE_TOOLBAR) c++; return c; }
+static int nt_count(flow_t *f) { int c=0; for (int i=0;i<f->nwidgets;i++) if (f->widgets[i].owner==FLOW_WIDGET_OWNER_NODE_TOOLBAR) c++; return c; }
+
 int main(void) {
   /* ---- flow_hit_edge: on-path hit, off-path miss ---- */
   {
@@ -338,6 +352,132 @@ int main(void) {
     ASSERT_INT(flow_hit_edge(f, mid, 0), -1, "target hidden: edge cascades to hidden");
     flow_set_node_hidden(f, b, 0);
     flow_free(f);
+  }
+
+  /* ================= inc-7 #5: edge toolbar ================= */
+  static const flow_toolbar_action ET_DEL[] = { { "\xe2\x9c\x95", et_del, NULL } };  /* ✕ delete */
+  static const flow_toolbar_action ET_CAP[] = { { "\xe2\x9c\x95", et_cap, NULL } };
+
+  /* (A) setter arms; hidden when no edge selected, shown when one is. */
+  {
+    int W=40,H=12; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){0,4},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){28,4}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_set_edge_toolbar(f, ET_DEL, 1);
+    flow_render(f, buf, W, H);
+    ASSERT_INT(et_count(f), 0, "edge toolbar hidden when no edge selected");
+    flow_select_edge(f, e, 0);
+    flow_render(f, buf, W, H);
+    ASSERT(et_count(f) >= 1, "edge toolbar shown for the selected edge");
+    free(buf); flow_free(f);
+  }
+
+  /* (B) the bar sits one row above the route midpoint (recompute the anchor exactly as
+     the engine does, via the shared screen-ends + route helpers). */
+  {
+    int W=40,H=12; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){0,4},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){28,4}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_set_edge_toolbar(f, ET_DEL, 1);
+    flow_select_edge(f, e, 0);
+    flow_render(f, buf, W, H);
+    flow_pt ss, ts; flow_pos sp, tp;
+    flow__edge_screen_ends(f, flow_get_edge(f, e), &ss, &sp, &ts, &tp);
+    const flow_edge_type *et = flow_edge_type_for(f, "default");
+    flow_route rt = {0}; et->route(ss, sp, ts, tp, &rt);
+    int anchor_y = rt.label_anchor.y; free(rt.cells);
+    ASSERT_INT(ety(f, 0), anchor_y - 1, "edge toolbar sits one row above the route midpoint");
+    free(buf); flow_free(f);
+  }
+
+  /* (C) a click on the action cell fires it and removes the edge. */
+  {
+    int W=40,H=12; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){0,4},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){28,4}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_set_edge_toolbar(f, ET_DEL, 1);
+    flow_select_edge(f, e, 0);
+    flow_render(f, buf, W, H);
+    int cx = etx(f, 0), cy = ety(f, 0);
+    ASSERT(cx >= 0, "edge toolbar cell present");
+    et_press(f, cx, cy); et_release(f, cx, cy);
+    ASSERT_INT(flow_edge_count(f), 0, "click on the action cell removed the edge");
+    ASSERT_INT(flow_selected_edge(f), -1, "no edge selected after removal");
+    free(buf); flow_free(f);
+  }
+
+  /* (D) the action fires EXACTLY ONCE with the edge id, and the press is CONSUMED
+     (no on_edge_click / on_pane_click fall-through). */
+  {
+    int W=40,H=12; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    f->cb.on_edge_click = et_onclick; f->cb.on_pane_click = et_onpane;
+    int a = flow_add_node(f, "default", (flow_pt){0,4},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){28,4}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_set_edge_toolbar(f, ET_CAP, 1);
+    flow_select_edge(f, e, 0);
+    flow_render(f, buf, W, H);
+    int cx = etx(f, 0), cy = ety(f, 0);
+    g_et_id = -2; g_et_fires = 0; g_eclick = 0; g_epane = 0;
+    et_press(f, cx, cy); et_release(f, cx, cy);
+    ASSERT_INT(g_et_id, e, "action fired with the selected edge id");
+    ASSERT_INT(g_et_fires, 1, "action fired exactly once (single-fire, not double)");
+    ASSERT_INT(g_eclick, 0, "consumed: on_edge_click did NOT fire");
+    ASSERT_INT(g_epane, 0, "consumed: on_pane_click did NOT fire");
+    free(buf); flow_free(f);
+  }
+
+  /* (E) mutual exclusivity with the node toolbar (the model's clear-on-select invariant). */
+  {
+    int W=40,H=12; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    int a = flow_add_node(f, "default", (flow_pt){0,4},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){28,4}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    static const flow_toolbar_action nacts[] = { { "del", et_cap, NULL } };
+    flow_set_node_toolbar(f, nacts, 1);
+    flow_set_edge_toolbar(f, ET_CAP, 1);
+    flow_select_node(f, a, 0);
+    flow_render(f, buf, W, H);
+    ASSERT_INT(et_count(f), 0, "edge bar hidden while a node is selected");
+    ASSERT(nt_count(f) >= 1, "node bar shown while a node is selected");
+    flow_select_edge(f, e, 0);
+    ASSERT_INT(flow_selected_node(f), -1, "edge-select cleared node selection");
+    flow_render(f, buf, W, H);
+    ASSERT(et_count(f) >= 1, "edge bar shown while the edge is selected");
+    ASSERT_INT(nt_count(f), 0, "node bar hidden while an edge is selected");
+    free(buf); flow_free(f);
+  }
+
+  /* (F) a click on the edge BODY (not the toolbar cell) still selects/fires on_edge_click
+     — the seam claims only toolbar cells. */
+  {
+    int W=40,H=12; flow_cell *buf = (flow_cell*)malloc((size_t)W*H*sizeof(flow_cell));
+    flow_t *f = flow_new(W, H); flow_register_defaults(f);
+    f->cb.on_edge_click = et_onclick;
+    int a = flow_add_node(f, "default", (flow_pt){0,4},  (void*)"A");
+    int b = flow_add_node(f, "default", (flow_pt){28,4}, (void*)"B");
+    int e = flow_add_edge(f, a, b, "out", "in");
+    flow_set_edge_toolbar(f, ET_CAP, 1);
+    flow_render(f, buf, W, H);              /* not selected yet: no toolbar */
+    /* a MIDDLE path cell (not an endpoint — an endpoint would arm a reconnect) */
+    flow_pt ss, ts; flow_pos sp, tp;
+    flow__edge_screen_ends(f, flow_get_edge(f, e), &ss, &sp, &ts, &tp);
+    const flow_edge_type *et = flow_edge_type_for(f, "default");
+    flow_route rt = {0}; et->route(ss, sp, ts, tp, &rt);
+    flow_route_cell mc = rt.cells[rt.count / 2]; flow_pt mid = { mc.x, mc.y }; free(rt.cells);
+    g_eclick = 0; g_et_id = -2;
+    et_press(f, mid.x, mid.y); et_release(f, mid.x, mid.y);
+    ASSERT_INT(g_eclick, 1, "edge-body click fired on_edge_click (fell through)");
+    ASSERT_INT(g_et_id, -2, "edge-body click did NOT fire a toolbar action");
+    free(buf); flow_free(f);
   }
 
   return flowtest_report("test_edge");

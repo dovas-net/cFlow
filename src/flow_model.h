@@ -350,6 +350,12 @@ typedef struct {
    BORROWED array; NULL/0 disarms. Transient chrome: never saved, never journaled. */
 void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n);
 
+/* Edge toolbar (inc-7 #5): a floating action bar on the single selected edge, anchored one
+   row above the route midpoint (recomputed each frame so it tracks the wire). Reuses the
+   shared flow_toolbar_action (its `id` is the selected edge id) and the controls-bar seam.
+   BORROWED array; NULL/0 disarms. Transient chrome: never saved, never journaled. */
+void flow_set_edge_toolbar(flow_t *f, const flow_toolbar_action *actions, int n);
+
 /* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
    xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
    the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
@@ -413,6 +419,7 @@ struct flow {
   int locked;     /* inc-7 #3: whole-canvas lock (Controls [lock]) — suppress drag/connect/reconnect/marquee/click-select; pan+zoom still work. Transient: never saved/journaled. */
   struct { int enabled; flow_corner corner; } controls;  /* inc-7 #3: Controls bar config (off by default; the minimap value-struct precedent) */
   struct { const flow_toolbar_action *actions; int n; } node_toolbar;  /* inc-7 #4: borrowed action array ({NULL,0}=off) */
+  struct { const flow_toolbar_action *actions; int n; } edge_toolbar;  /* inc-7 #5: borrowed action array ({NULL,0}=off) */
   struct { int x, y, w, h, owner, action; } widgets[16]; int nwidgets;  /* inc-7 #3: render-filled widget hit-rect cache (no heap) — drawn region == hittable region; refilled each frame */
   struct {                                  /* selection clipboard (inc-5 #7): deep snapshots.
                                                node snaps store ABS pos in .node.pos (resolved at
@@ -1098,6 +1105,7 @@ void flow_set_controls(flow_t *f, int enabled, flow_corner corner) { f->controls
 void flow_set_locked(flow_t *f, int on) { f->locked = on ? 1 : 0; }
 int  flow_locked(flow_t *f) { return f->locked; }
 void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->node_toolbar.actions = actions; f->node_toolbar.n = n; }
+void flow_set_edge_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->edge_toolbar.actions = actions; f->edge_toolbar.n = n; }
 int flow_selected_edge(flow_t *f) {
   for (int i = 0; i < f->nedges; i++) if (f->edges[i].flags & FLOW_SELECTED) return f->edges[i].id;
   return -1;
