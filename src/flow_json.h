@@ -53,6 +53,12 @@ int flow_save(flow_t *f, const char *path) {
     fprintf(out, "{\"id\":%d,\"type\":", n->id);
     flow__json_str(out, n->type);
     fprintf(out, ",\"x\":%d,\"y\":%d,\"parent\":%d", n->pos.x, n->pos.y, n->parent);
+    /* inc-8 #1: per-element gates as xyflow bools, emitted ONLY when set so a default node is
+       byte-identical to pre-inc-8 output (the json_basic golden survives). No raw "flags":int —
+       that would couple on-disk bytes to enum order and could inject transient bits. */
+    if (n->flags & FLOW_NODRAG)   fputs(",\"draggable\":false",  out);
+    if (n->flags & FLOW_NOSELECT) fputs(",\"selectable\":false", out);
+    if (n->flags & FLOW_NODELETE) fputs(",\"deletable\":false",  out);
     const flow_node_type *t = flow_node_type_for(f, n->type);
     if (t && t->save) { fputs(",\"data\":", out); t->save(n, out); }
     fputc('}', out);
@@ -342,6 +348,12 @@ int flow_load(flow_t *f, const char *path) {
         already-overwritten earlier node and mutate the wrong one) */
       if (id > 0) n->id = id;
       n->parent = parent;
+      /* inc-8 #1: per-element gates. Only the literal `false` sets the (negative) bit; an absent key
+         leaves it clear == permissive, so every pre-inc-8 file loads with all gates open. */
+      { flow_json_rd gv; const char *gs; int gl;
+        if (flow__json_find(elem, eend, "draggable",  &gv) && flow__json_raw(gv, &gs, &gl) && gl == 5 && memcmp(gs, "false", 5) == 0) n->flags |= FLOW_NODRAG;
+        if (flow__json_find(elem, eend, "selectable", &gv) && flow__json_raw(gv, &gs, &gl) && gl == 5 && memcmp(gs, "false", 5) == 0) n->flags |= FLOW_NOSELECT;
+        if (flow__json_find(elem, eend, "deletable",  &gv) && flow__json_raw(gv, &gs, &gl) && gl == 5 && memcmp(gs, "false", 5) == 0) n->flags |= FLOW_NODELETE; }
       /* data hook BEFORE measure (device measure reads n->data) */
       const flow_node_type *t = flow_node_type_for(f, n->type);
       if (t && t->load) {

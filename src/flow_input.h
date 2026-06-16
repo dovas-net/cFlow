@@ -14,6 +14,15 @@ int  flow_parse_mouse(const char *s, int n, flow_mouse_event *ev);
 void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev);
 
 #ifdef FLOW_IMPLEMENTATION
+/* inc-8 #1: a drag is MULTI iff the GRABBED node is itself selected within a >1 set. Gating
+   selectNodesOnDrag for FLOW_NOSELECT means drag_node may NOT be in the selection, so the raw
+   flow_selected_count is no longer a single-vs-multi proxy — both the motion mover and the
+   drop-reparent guard must key off drag_node. For every pre-inc-8 drag the grabbed node was always
+   selected, so this is byte-identical to the old `count > 1` / `count == 1` tests. */
+static int flow__drag_is_multi(flow_t *f) {
+  flow_node *dn = flow_get_node(f, f->drag_node);
+  return dn && (dn->flags & FLOW_SELECTED) && flow_selected_count(f) > 1;
+}
 int flow_parse_mouse(const char *s, int n, flow_mouse_event *ev) {
   if (n < 4 || s[0] != '\x1b' || s[1] != '[' || s[2] != '<') return 0;
   int B = 0, X = 0, Y = 0, field = 0;
@@ -217,7 +226,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->down_modsel = 0; f->marquee_active = 0;
       unsigned mod = ev->mods & (FLOW_MOD_SHIFT | FLOW_MOD_CTRL);
       if (f->down_node != -1) {
-        if (mod) {                               /* shift/ctrl-click a node: modify the set NOW */
+        if (mod && flow__node_selectable(flow_get_node(f, f->down_node))) {  /* shift/ctrl-click a SELECTABLE node: modify the set NOW. inc-8 #1: a selectable=false node skips this entirely — leaving down_modsel=0 so the release takes the plain-click path (no wrongful on_node_click suppress / group-drag arm). */
           if (ev->mods & FLOW_MOD_CTRL) flow_toggle_node(f, f->down_node);  /* toggle */
           else                          flow_select_node(f, f->down_node, 1);/* shift: additive add */
           f->down_modsel = 1;                    /* suppress release replace + on_node_click; arm group drag */
@@ -254,13 +263,15 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
           before any auto-pan — same shape as drag_grab/drag_last_world below */
       } else if (f->down_node != -1) {
         flow_node *nd = flow_get_node(f, f->down_node);
-        flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
-        f->drag_node = f->down_node; f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;
-        f->drag_last_world = flow_to_world(f, f->down_pos);   /* multi-drag delta anchor */
-        flow__undo_begin(f);                     /* whole drag gesture (single OR multi) = one undo step;
-                                                    closed on release iff drag_node is still armed */
-        if (!(nd->flags & FLOW_SELECTED))        /* unselected node: plain drag REPLACES selection */
-          flow_select_node(f, f->down_node, 0);  /* selectNodesOnDrag; selected node keeps the set (group drag) */
+        if (nd && !(nd->flags & FLOW_NODRAG)) {  /* inc-8 #1: draggable=false rejects the gesture at arm-time (xyflow d3 .filter). drag_node stays -1, so it neither drags nor pans and the release takes the click path. */
+          flow_pt w = flow_to_world(f, f->down_pos), a = flow_node_abs(f, nd);
+          f->drag_node = f->down_node; f->drag_grab.x = w.x - a.x; f->drag_grab.y = w.y - a.y;
+          f->drag_last_world = flow_to_world(f, f->down_pos);   /* multi-drag delta anchor */
+          flow__undo_begin(f);                     /* whole drag gesture (single OR multi) = one undo step;
+                                                      closed on release iff drag_node is still armed */
+          if (!(nd->flags & FLOW_SELECTED) && flow__node_selectable(nd)) /* unselected SELECTABLE node: plain drag REPLACES selection (inc-8 #1: selectable=false drags unselected) */
+            flow_select_node(f, f->down_node, 0);  /* selectNodesOnDrag; selected node keeps the set (group drag) */
+        }
       } else {
         f->dragging_pan = 1; f->last_mouse = f->down_pos;
       }
@@ -284,7 +295,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
          cursor as the view scrolls (place-then-pan would make it visually drift). */
       f->last_cursor = scr;                       /* inc-6 #8 */
       flow__autopan(f, scr);
-      if (flow_selected_count(f) > 1) {           /* MULTI-DRAG: shift the set by per-motion world delta */
+      if (flow__drag_is_multi(f)) {               /* MULTI-DRAG: shift the set by per-motion world delta (only when the grabbed node is itself part of the >1 selection) */
         flow_pt w = flow_to_world(f, scr);
         int dx = w.x - f->drag_last_world.x, dy = w.y - f->drag_last_world.y;
         if (dx || dy) {
@@ -295,6 +306,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
              byte-identical to the prior per-node delta.) */
           for (int i = 0; i < f->nnodes; i++) {
             if (!(f->nodes[i].flags & FLOW_SELECTED)) continue;
+            if (f->nodes[i].flags & FLOW_NODRAG) continue;  /* inc-8 #1: a draggable=false sibling is held fixed while peers move */
             int root = 1;                          /* root unless a STRICT ancestor is selected */
             int parent = f->nodes[i].parent, guard = 0;
             while (parent != -1 && guard++ < 1024) {
@@ -412,7 +424,8 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         f->last_click_node = -1;                 /* a modifier-click breaks any double-click pair */
         f->last_click_edge = -1;
       } else if (f->down_node != -1) {
-        flow_select_node(f, f->down_node, 0);
+        if (flow__node_selectable(flow_get_node(f, f->down_node)))
+          flow_select_node(f, f->down_node, 0);  /* inc-8 #1: selectable=false isn't selected; staying in-branch preserves the current selection (no fall-through to clear/on_pane_click) */
         if (f->cb.on_node_click) f->cb.on_node_click(f, f->down_node, f->cb.user);
         if (f->down_node == f->last_click_node) { /* 2nd consecutive plain click on the SAME node: double-click */
           if (f->cb.on_node_dblclick) f->cb.on_node_dblclick(f, f->down_node, f->cb.user); /* fires AFTER on_node_click */
@@ -440,8 +453,10 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         }
         f->last_click_node = -1;                 /* edge/pane click breaks the node pair */
       }
-    } else if (f->moved && f->drag_node != -1 && flow_selected_count(f) == 1) {
-      /* DRAG-TO-REPARENT (single-node drag only for v1). On drop, hit-test the cursor for a
+    } else if (f->moved && f->drag_node != -1 && !flow__drag_is_multi(f)) {
+      /* DRAG-TO-REPARENT (single-node drag only for v1; multi-reparent deferred to #5). Keyed off
+         drag_node, not the selection count: a selectable=false node drags+reparents unselected (#1),
+         and a true multi-drag (grabbed node selected, count>1) is still excluded. On drop, hit-test the cursor for a
          `group` node — skipping the dragged node AND its own descendants (avoid self-parent).
          A group hit that differs from the current parent reparents (abs preserved => the node
          stays visually put). Dropping on the empty pane while parented detaches to top level.
