@@ -1,5 +1,19 @@
-/* hello_flow — increment-6 showcase. Three nodes, two edges, plus everything the
-   increment added, on the poll-driven redraw clock (#4):
+/* hello_flow — increment-6 + increment-7 showcase. Three nodes, two edges, plus
+   everything the increments added, on the poll-driven redraw clock (#4).
+
+   increment-7 (the feel layer):
+     · theme / colorMode        — 't' cycles DEFAULT -> DARK -> LIGHT; all engine chrome
+                                   (canvas, grid, edges, handles, minimap, statusbar,
+                                   controls, toolbars) recolors. Node bodies keep FLOW_FG/BG.
+     · live connection feedback — drag a wire from a node's right handle: the candidate
+                                   target handle turns green (valid) / red (duplicate/self).
+     · Controls bar             — top-right [+][-][fit][lock], clickable with the mouse.
+     · lock mode                — 'L' or the [lock] button: drag/connect/select are frozen,
+                                   pan + zoom still work (a read-only / presentation view).
+     · node toolbar             — select ONE node: a [del][dup] strip appears above it.
+     · edge toolbar             — select an edge: a [✕] button rides its midpoint.
+
+   increment-6:
      · #5 marching-ants edges   — ON at launch; 'e' toggles. The clock arms itself
                                    while any edge is animated (10 Hz), idle otherwise.
      · #7 devtools HUD          — bottom-right panel; 'i' toggles. counts / viewport /
@@ -57,7 +71,7 @@ static int pal_hook(flow_t *f, const char *seq, int len, void *user) {
 
 static void overlay(flow_t *f, flow_surface *s, void *u) {
   (void)u;
-  flow_text(s, 1, 0, "e:anim i:hud /:find  drag-to-edge:autopan  n:add x:del f:fit q:quit",
+  flow_text(s, 1, 0, "e:anim i:hud /:find t:theme L:lock  select->toolbar  corner->controls",
             FLOW_FG, FLOW_BG, FLOW_BOLD);
   if (pal.open) {                                       /* #6 the modal find box */
     char line[80]; int out[1]; int n = flow_find_nodes(f, pal.q, out, 1);
@@ -94,6 +108,23 @@ static void key_pal(flow_t *f, void *u) {              /* #6 open the modal pale
   (void)u; pal.open = 1; pal.n = 0; pal.q[0] = 0; flow_set_key_hook_modal(f, 1);
 }
 
+/* ---- increment-7 (the feel layer) ---- */
+static void key_theme(flow_t *f, void *u) {            /* #1 cycle DEFAULT -> DARK -> LIGHT */
+  (void)u; flow_color_mode m = flow_color_mode_get(f);
+  flow_set_color_mode(f, m == FLOW_COLOR_DEFAULT ? FLOW_COLOR_DARK
+                       : m == FLOW_COLOR_DARK    ? FLOW_COLOR_LIGHT : FLOW_COLOR_DEFAULT);
+}
+static void key_lock(flow_t *f, void *u) { (void)u; flow_set_locked(f, !flow_locked(f)); }  /* #3 lock toggle */
+/* #4/#5 toolbar actions — borrowed, file-static lifetime (the engine never copies them). */
+static void act_node_del(flow_t *f, int id, void *u) { (void)u; flow_remove_node(f, id); }
+static void act_node_dup(flow_t *f, int id, void *u) {
+  (void)u; flow_node *n = flow_get_node(f, id); if (!n) return;
+  flow_add_node(f, n->type, (flow_pt){ n->pos.x + 3, n->pos.y + 3 }, n->data);   /* shallow dup: same type + label */
+}
+static void act_edge_del(flow_t *f, int id, void *u) { (void)u; flow_remove_edge(f, id); }
+static const flow_toolbar_action node_actions[] = { { "del", act_node_del, NULL }, { "dup", act_node_dup, NULL } };
+static const flow_toolbar_action edge_actions[] = { { "\xe2\x9c\x95", act_edge_del, NULL } };   /* ✕ delete edge */
+
 int main(void) {
   flow_t *f = flow_new(80, 24);
   flow_register_defaults(f);
@@ -109,6 +140,11 @@ int main(void) {
   flow_bind_key(f, "e", key_anim, NULL);
   flow_bind_key(f, "i", key_hud,  NULL);
   flow_bind_key(f, "/", key_pal,  NULL);
+  flow_bind_key(f, "t", key_theme, NULL);             /* inc-7 #1 theme cycle */
+  flow_bind_key(f, "L", key_lock,  NULL);             /* inc-7 #3 lock toggle */
+  flow_set_controls(f, 1, FLOW_CORNER_TR);            /* inc-7 #3 Controls panel — TR keeps it clear of the row-0 help + bottom statusbar */
+  flow_set_node_toolbar(f, node_actions, 2);          /* inc-7 #4 — shows above a single selected node */
+  flow_set_edge_toolbar(f, edge_actions, 1);          /* inc-7 #5 — shows on a selected edge */
   flow_set_statusbar(f, 1);                            /* built-in n:add x:del f:fit ?:help q:quit bar */
 
   flow_run(f);
