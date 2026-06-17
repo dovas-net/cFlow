@@ -68,6 +68,42 @@ Build (requires **C99 or later**; `-lm` is required on Linux):
 cc app.c -std=c11 -lm -o app
 ```
 
+## Embedding in your own event loop
+
+`flow_run` owns the terminal — it sets raw mode, polls stdin, and writes frames to stdout.
+When you embed `flow` inside an app that **already has an event loop** (a game tick, a GUI
+host, an ssh session, a test), skip `flow_run` and drive the model directly with two pure,
+terminal-free calls:
+
+- **`flow_feed(f, bytes, n)`** — hand the model input bytes from whatever source you own (your
+  own `read()`, a socket, a scripted sequence). Same key/mouse parser `flow_run` uses.
+- **`flow_render_diff(f)`** — render the model, diff it against the previous frame, advance the
+  front buffer, and **return** a malloc'd escape string (absolute-positioned CSI/SGR). You
+  write that string to whatever fd you own, then `free()` it. It returns `""` when nothing
+  changed. (`flow_present` is exactly this plus `fputs(stdout)` + `fflush`.)
+
+```c
+flow_t *f = flow_new(80, 24);          /* you pick the surface size — no terminal to query */
+flow_register_defaults(f);
+/* ... add nodes/edges ... */
+
+for (;;) {                              /* YOUR loop, YOUR I/O */
+  char in[64];
+  int n = my_read_input(in, sizeof in);  /* socket / pty / replay — your source */
+  flow_feed(f, in, n);
+
+  char *frame = flow_render_diff(f);    /* "" if nothing moved */
+  my_write_output(frame, strlen(frame));/* your fd: pty, file, network */
+  free(frame);
+}
+```
+
+Only `flow_run` / `flow_present` / `flow_term_*` are POSIX/terminal-bound; everything else
+(model, geometry, render-to-buffer, routing, layout, JSON) is portable C. For the full back
+buffer instead of a diff, call `flow_render(f, cells, cols, rows)` and read the `flow_cell`
+grid yourself. See **[`examples/embed_headless.c`](examples/embed_headless.c)** for a complete,
+TTY-free program (`make examples`).
+
 ## Requirements & platform
 
 - **C99 or later**, `-lm`.
@@ -83,8 +119,8 @@ cc app.c -std=c11 -lm -o app
 `flow.h` is **generated** from `src/` by `tools/amalgamate.sh` — edit `src/`, never `flow.h`.
 
 ```sh
-make            # regenerate flow.h and build the demos
-make test       # run the headless test suite (35 suites, snapshot goldens)
+make            # regenerate flow.h and build the demos + examples
+make test       # run the headless test suite (36 suites, snapshot goldens)
 ```
 
 See `docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design, and

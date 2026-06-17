@@ -4397,6 +4397,12 @@ int flow_term_size(int *cols, int *rows) {
 #endif
 /* ===================== src/flow_run.h ===================== */
 /* ===== present (diff+flush), feed (arrow-key pan), run loop ===== */
+char *flow_render_diff(flow_t *f);   /* embed primitive: render the current model, diff it against the
+                                        previous frame, ADVANCE the front buffer, and return a malloc'd
+                                        escape string (absolute-positioned CSI/SGR) the HOST writes to its
+                                        own fd/terminal, then free()s. "" (empty, non-NULL) when nothing
+                                        changed. No stdout/termios coupling — for host-owned loops.
+                                        flow_present is exactly this + fputs(stdout)+fflush. */
 void flow_present(flow_t *f);
 void flow_feed(flow_t *f, const char *bytes, int n);
 void flow_run(flow_t *f);
@@ -4413,13 +4419,17 @@ int flow__frames_armed(flow_t *f) {                            /* recomputed eac
     if (flow_edges(f)[i].flags & FLOW_ANIMATED) return 1;
   return 0;
 }
-void flow_present(flow_t *f) {
+char *flow_render_diff(flow_t *f) {
   flow_cell *back = (flow_cell*)calloc((size_t)f->cols * f->rows, sizeof(flow_cell));
   flow_render(f, back, f->cols, f->rows);
-  char *esc = flow_diff_emit(f->front, back, f->cols, f->rows);
-  fputs(esc, stdout); fflush(stdout); free(esc);
-  memcpy(f->front, back, (size_t)f->cols * f->rows * sizeof(flow_cell));
+  char *esc = flow_diff_emit(f->front, back, f->cols, f->rows);   /* malloc'd; caller frees */
+  memcpy(f->front, back, (size_t)f->cols * f->rows * sizeof(flow_cell));   /* advance prev-frame */
   free(back);
+  return esc;
+}
+void flow_present(flow_t *f) {                                    /* the stdout-bound convenience over flow_render_diff */
+  char *esc = flow_render_diff(f);
+  fputs(esc, stdout); fflush(stdout); free(esc);
 }
 void flow_feed(flow_t *f, const char *b, int n) {
   int i = 0;
