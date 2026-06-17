@@ -39,8 +39,16 @@ static void flow__signal_handler(int sig) {
 static void flow__install_signal_handlers(void) {
   if (flow__sig_installed) return;                    /* idempotent: don't clobber the saved priors */
   struct sigaction sa; memset(&sa, 0, sizeof sa);
-  sa.sa_handler = flow__signal_handler; sigemptyset(&sa.sa_mask); sa.sa_flags = 0;
-  for (int i = 0; i < FLOW__NSIG; i++) sigaction(flow__sig_list[i], &sa, &flow__old_sa[i]);
+  sa.sa_handler = flow__signal_handler;
+  sigfillset(&sa.sa_mask);                            /* block ALL signals while the (short) handler runs, so a
+                                                         second fatal signal can't preempt cleanup or steal status */
+  sa.sa_flags = 0;
+  for (int i = 0; i < FLOW__NSIG; i++) {
+    sigaction(flow__sig_list[i], NULL, &flow__old_sa[i]);   /* save prior (kept for balanced removal) */
+    if (flow__old_sa[i].sa_handler != SIG_IGN)             /* preserve a deliberately-ignored signal — don't hijack
+                                                              (nohup / backgrounded / a Ctrl-C-ignoring wrapper) */
+      sigaction(flow__sig_list[i], &sa, NULL);
+  }
   flow__sig_installed = 1;
 }
 static void flow__remove_signal_handlers(void) {
@@ -62,10 +70,11 @@ void flow_term_setup(void) {
   flow__install_signal_handlers();   /* scoped to the terminal path: the headless embed path never calls setup */
 }
 void flow_term_restore(void) {
-  flow__remove_signal_handlers();
-  flow__term_active = 0;
   fflush(stdout);                                     /* drain any buffered frame before the raw write */
-  flow__term_restore_raw();                           /* same bytes the signal handler would emit */
+  flow__term_restore_raw();                           /* restore the terminal FIRST — handlers stay armed +
+                                                         idempotent, so a signal racing teardown still cleans up */
+  flow__term_active = 0;
+  flow__remove_signal_handlers();                     /* ...then disarm (no window where a signal dies raw) */
 }
 int flow_term_size(int *cols, int *rows) {
   struct winsize ws;

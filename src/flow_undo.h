@@ -148,8 +148,10 @@ void flow_undo(flow_t *f) {
   f->journal.applying = 1; f->cb_suppress++;
   for (int i = c.nops - 1; i >= 0; i--) flow__apply_op(f, &c.ops[i], 0);
   f->cb_suppress--; f->journal.applying = 0;
-  f->journal.redo = (struct flow__cmd*)flow__grow(f->journal.redo, &f->journal.rcap,
-                                                  f->journal.rn + 1, sizeof *f->journal.redo);
+  struct flow__cmd *redo = (struct flow__cmd*)flow__grow(f->journal.redo, &f->journal.rcap,
+                                                         f->journal.rn + 1, sizeof *f->journal.redo);
+  if (!redo) { flow__cmd_free(&c); return; }     /* OOM: inverse applied; drop the redo entry (no crash, no leak) */
+  f->journal.redo = redo;
   f->journal.redo[f->journal.rn++] = c;
 }
 void flow_redo(flow_t *f) {
@@ -160,8 +162,10 @@ void flow_redo(flow_t *f) {
   f->cb_suppress--; f->journal.applying = 0;
   /* redo is NOT a new mutation: push straight back (no eviction needed — record clears
      redo first, so n + rn never exceeds the cap), redo stack preserved for chains. */
-  f->journal.items = (struct flow__cmd*)flow__grow(f->journal.items, &f->journal.cap,
-                                                   f->journal.n + 1, sizeof *f->journal.items);
+  struct flow__cmd *items = (struct flow__cmd*)flow__grow(f->journal.items, &f->journal.cap,
+                                                          f->journal.n + 1, sizeof *f->journal.items);
+  if (!items) { flow__cmd_free(&c); return; }    /* OOM: redo applied; drop the undo entry (no crash, no leak) */
+  f->journal.items = items;
   f->journal.items[f->journal.n++] = c;
 }
 void flow_set_undo_limit(flow_t *f, int max_commands) {

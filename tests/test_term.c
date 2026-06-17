@@ -39,27 +39,30 @@ int main(void) {
     ASSERT_STR(buf, flow__restore_seq, "restore_raw write()s exactly the restore seq");
   }
 
-  /* (3) install replaces SIGINT/SIGTERM with flow's handler; remove restores the
-     PREVIOUS disposition exactly. Proven via sigaction queries — no raise(). */
+  /* (3) install puts flow's handler over a default-disposition signal but PRESERVES a
+     signal the parent deliberately ignored (SIG_IGN — nohup/backgrounded/Ctrl-C-ignoring
+     wrapper); the handler masks the other fatal signals during cleanup; remove restores
+     the prior disposition exactly. Proven via sigaction queries — no raise(). */
   {
     struct sigaction ign, dfl, cur;
     memset(&ign, 0, sizeof ign); ign.sa_handler = SIG_IGN; sigemptyset(&ign.sa_mask);
     memset(&dfl, 0, sizeof dfl); dfl.sa_handler = SIG_DFL; sigemptyset(&dfl.sa_mask);
-    sigaction(SIGINT, &ign, NULL);                 /* seed known priors */
-    sigaction(SIGTERM, &dfl, NULL);
+    sigaction(SIGINT,  &dfl, NULL);                /* default disposition -> flow installs */
+    sigaction(SIGTERM, &ign, NULL);                /* deliberately ignored -> flow must NOT hijack */
 
     flow__install_signal_handlers();
     sigaction(SIGINT, NULL, &cur);
-    ASSERT(cur.sa_handler == flow__signal_handler, "install: SIGINT -> flow handler");
+    ASSERT(cur.sa_handler == flow__signal_handler, "install: SIGINT (was SIG_DFL) -> flow handler");
+    ASSERT(sigismember(&cur.sa_mask, SIGTERM) == 1, "handler masks other fatal signals during cleanup");
     sigaction(SIGTERM, NULL, &cur);
-    ASSERT(cur.sa_handler == flow__signal_handler, "install: SIGTERM -> flow handler");
+    ASSERT(cur.sa_handler == SIG_IGN, "install: SIGTERM (was SIG_IGN) stays ignored, not hijacked");
 
     flow__remove_signal_handlers();
     sigaction(SIGINT, NULL, &cur);
-    ASSERT(cur.sa_handler == SIG_IGN, "remove: SIGINT restored to prior SIG_IGN");
+    ASSERT(cur.sa_handler == SIG_DFL, "remove: SIGINT restored to prior SIG_DFL");
     sigaction(SIGTERM, NULL, &cur);
-    ASSERT(cur.sa_handler == SIG_DFL, "remove: SIGTERM restored to prior SIG_DFL");
-    sigaction(SIGINT, &dfl, NULL);                 /* don't leak SIG_IGN into later code */
+    ASSERT(cur.sa_handler == SIG_IGN, "remove: SIGTERM still SIG_IGN");
+    sigaction(SIGTERM, &dfl, NULL);                /* don't leak SIG_IGN into later code */
   }
 
   /* (4) double install is a no-op — the saved prior handler is not clobbered. */

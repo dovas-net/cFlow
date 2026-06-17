@@ -51,5 +51,22 @@ int main(void) {
   free(frame);
   flow_free(f);
 
+  /* (4) flow_undo grows the redo stack; on OOM it must drop the history entry rather
+     than deref NULL. The inverse op is still applied (graph consistent); ASan/UBSan in
+     the gate proves the dropped command is freed (no leak). */
+  {
+    flow_t *g = flow_new(40, 12);
+    ASSERT(g != NULL, "flow_new for undo-OOM case");
+    flow_register_defaults(g);
+    int id = flow_add_node(g, "default", (flow_pt){ 2, 2 }, (void*)"u");
+    ASSERT(id >= 0 && flow_node_count(g) == 1, "seeded one undoable add");
+
+    g_alloc_n = 0; g_fail_at = 0;                  /* fail the redo-stack grow (0->8) inside flow_undo */
+    flow_undo(g);                                  /* applies the inverse, then the redo grow fails */
+    g_fail_at = -1;
+    ASSERT_INT(flow_node_count(g), 0, "undo applied (node removed) despite redo-grow OOM, no crash");
+    flow_free(g);
+  }
+
   return flowtest_report("test_oom");
 }
