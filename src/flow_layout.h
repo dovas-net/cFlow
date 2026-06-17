@@ -59,22 +59,22 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
                                  const flow__lay_edge *ed, int ne,
                                  flow_layered_dir dir, int gx, int gy, flow_pt *out) {
   /* out-adjacency in edge-array order (offset/list form keeps edge order) */
-  int *outdeg = (int*)calloc((size_t)m, sizeof(int));
-  int *adjoff = (int*)malloc((size_t)(m + 1) * sizeof(int));
-  int *adjlist = ne ? (int*)malloc((size_t)ne * sizeof(int)) : NULL;
-  char *drop = (char*)calloc((size_t)(ne ? ne : 1), 1);
+  int *outdeg = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
+  int *adjoff = (int*)FLOW_MALLOC((size_t)(m + 1) * sizeof(int));
+  int *adjlist = ne ? (int*)FLOW_MALLOC((size_t)ne * sizeof(int)) : NULL;
+  char *drop = (char*)FLOW_CALLOC((size_t)(ne ? ne : 1), 1);
   for (int e = 0; e < ne; e++) outdeg[ed[e].a]++;
   adjoff[0] = 0;
   for (int v = 0; v < m; v++) adjoff[v + 1] = adjoff[v] + outdeg[v];
-  { int *cur = (int*)calloc((size_t)m, sizeof(int));
+  { int *cur = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
     for (int e = 0; e < ne; e++) adjlist[adjoff[ed[e].a] + cur[ed[e].a]++] = e;
-    free(cur); }
+    FLOW_FREE(cur); }
   /* (1) back-edge drop: iterative DFS, roots and out-edges in index/edge order.
      An edge into an ON-STACK node closes a cycle -> dropped (deterministically,
      by traversal order) so rank assignment can never loop. */
-  char *state = (char*)calloc((size_t)m, 1);            /* 0 unvisited, 1 on-stack, 2 done */
-  int *stkv = (int*)malloc((size_t)m * sizeof(int));
-  int *stke = (int*)malloc((size_t)m * sizeof(int));
+  char *state = (char*)FLOW_CALLOC((size_t)m, 1);            /* 0 unvisited, 1 on-stack, 2 done */
+  int *stkv = (int*)FLOW_MALLOC((size_t)m * sizeof(int));
+  int *stke = (int*)FLOW_MALLOC((size_t)m * sizeof(int));
   for (int r = 0; r < m; r++) {
     if (state[r]) continue;
     int sp = 0; stkv[0] = r; stke[0] = 0; state[r] = 1; sp = 1;
@@ -89,9 +89,9 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
     }
   }
   /* (2) longest-path ranks: Kahn over kept edges, smallest ready index first */
-  int *indeg = (int*)calloc((size_t)m, sizeof(int));
-  int *rank = (int*)calloc((size_t)m, sizeof(int));
-  char *done = (char*)calloc((size_t)m, 1);
+  int *indeg = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
+  int *rank = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
+  char *done = (char*)FLOW_CALLOC((size_t)m, 1);
   for (int e = 0; e < ne; e++) if (!drop[e]) indeg[ed[e].b]++;
   for (int processed = 0; processed < m; processed++) {
     int v = -1;
@@ -110,17 +110,17 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
   for (int i = 0; i < m; i++) if (rank[i] > maxrank) maxrank = rank[i];
   int R = maxrank + 1;
   /* (3) rank buckets (initial order: ascending local index) + barycenter sweeps */
-  int *rcount = (int*)calloc((size_t)R, sizeof(int));
-  int *roff = (int*)malloc((size_t)(R + 1) * sizeof(int));
-  int *rlist = (int*)malloc((size_t)m * sizeof(int));
-  int *pos = (int*)malloc((size_t)m * sizeof(int));     /* node -> position within its rank */
+  int *rcount = (int*)FLOW_CALLOC((size_t)R, sizeof(int));
+  int *roff = (int*)FLOW_MALLOC((size_t)(R + 1) * sizeof(int));
+  int *rlist = (int*)FLOW_MALLOC((size_t)m * sizeof(int));
+  int *pos = (int*)FLOW_MALLOC((size_t)m * sizeof(int));     /* node -> position within its rank */
   for (int i = 0; i < m; i++) rcount[rank[i]]++;
   roff[0] = 0;
   for (int r = 0; r < R; r++) roff[r + 1] = roff[r] + rcount[r];
-  { int *cur = (int*)calloc((size_t)R, sizeof(int));
+  { int *cur = (int*)FLOW_CALLOC((size_t)R, sizeof(int));
     for (int i = 0; i < m; i++) { int r = rank[i]; rlist[roff[r] + cur[r]] = i; pos[i] = cur[r]++; }
-    free(cur); }
-  flow__lay_ord *ord = (flow__lay_ord*)malloc((size_t)m * sizeof *ord);
+    FLOW_FREE(cur); }
+  flow__lay_ord *ord = (flow__lay_ord*)FLOW_MALLOC((size_t)m * sizeof *ord);
   for (int sweep = 0; sweep < 4; sweep++) {             /* alternate down/up sweeps */
     int down = !(sweep & 1);
     for (int rr = 0; rr < R; rr++) {
@@ -147,8 +147,8 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
   /* (4) integer coordinates. Flow axis: ranks march by max extent + gap (LR: gap_x,
      TB: gap_y). Cross axis: stack by extent + the other gap, centering each rank
      against the tallest/widest one (integer division — deterministic). */
-  int *ext = (int*)calloc((size_t)R, sizeof(int));      /* per-rank flow-axis extent */
-  int *tot = (int*)calloc((size_t)R, sizeof(int));      /* per-rank cross-axis total */
+  int *ext = (int*)FLOW_CALLOC((size_t)R, sizeof(int));      /* per-rank flow-axis extent */
+  int *tot = (int*)FLOW_CALLOC((size_t)R, sizeof(int));      /* per-rank cross-axis total */
   int maxtot = 0;
   for (int r = 0; r < R; r++) {
     for (int i = 0; i < rcount[r]; i++) {
@@ -171,9 +171,9 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
     }
     off += ext[r] + (dir == FLOW_LR ? gx : gy);
   }
-  free(outdeg); free(adjoff); free(adjlist); free(drop); free(state); free(stkv); free(stke);
-  free(indeg); free(rank); free(done); free(rcount); free(roff); free(rlist); free(pos);
-  free(ord); free(ext); free(tot);
+  FLOW_FREE(outdeg); FLOW_FREE(adjoff); FLOW_FREE(adjlist); FLOW_FREE(drop); FLOW_FREE(state); FLOW_FREE(stkv); FLOW_FREE(stke);
+  FLOW_FREE(indeg); FLOW_FREE(rank); FLOW_FREE(done); FLOW_FREE(rcount); FLOW_FREE(roff); FLOW_FREE(rlist); FLOW_FREE(pos);
+  FLOW_FREE(ord); FLOW_FREE(ext); FLOW_FREE(tot);
 }
 
 /* FORCE (Fruchterman-Reingold): deterministic circular initial placement by local
@@ -199,10 +199,10 @@ static void flow__layout_force(flow_t *f, const int *mem, int m,
     if (k < 8.0f) k = 8.0f;
   }
   float grav = o->gravity > 0.0f ? o->gravity : 0.05f;
-  float *px = (float*)malloc((size_t)m * sizeof(float));
-  float *py = (float*)malloc((size_t)m * sizeof(float));
-  float *dx = (float*)malloc((size_t)m * sizeof(float));
-  float *dy = (float*)malloc((size_t)m * sizeof(float));
+  float *px = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
+  float *py = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
+  float *dx = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
+  float *dy = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
   float R = k * (float)m / 6.2831853f;                  /* ~k of arc between neighbors */
   if (R < k) R = k;
   for (int i = 0; i < m; i++) {
@@ -251,7 +251,7 @@ static void flow__layout_force(flow_t *f, const int *mem, int m,
     out[i].x = (int)lroundf(px[i] - (float)n->w / 2.0f);
     out[i].y = (int)lroundf(py[i] - (float)n->h / 2.0f);
   }
-  free(px); free(py); free(dx); free(dy);
+  FLOW_FREE(px); FLOW_FREE(py); FLOW_FREE(dx); FLOW_FREE(dy);
 }
 
 void flow_layout(flow_t *f, flow_layout_opts opts) {
@@ -264,8 +264,8 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
      parent_abs. (flow_group appends containers AFTER their children, so first
      appearance alone would visit the children's partition too early.) */
   int np = 0;
-  int *plist = (int*)malloc((size_t)f->nnodes * sizeof(int));
-  int *pdepth = (int*)malloc((size_t)f->nnodes * sizeof(int));
+  int *plist = (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int));
+  int *pdepth = (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int));
   for (int i = 0; i < f->nnodes; i++) {
     int p = f->nodes[i].parent, seen = 0;
     for (int j = 0; j < np; j++) if (plist[j] == p) { seen = 1; break; }
@@ -278,9 +278,9 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
       int tp = plist[j]; plist[j] = plist[j - 1]; plist[j - 1] = tp;
       int td = pdepth[j]; pdepth[j] = pdepth[j - 1]; pdepth[j - 1] = td;
     }
-  int *mem = (int*)malloc((size_t)f->nnodes * sizeof(int));        /* member node indices */
-  flow_pt *out = (flow_pt*)malloc((size_t)f->nnodes * sizeof(flow_pt));
-  flow__lay_edge *ed = f->nedges ? (flow__lay_edge*)malloc((size_t)f->nedges * sizeof *ed) : NULL;
+  int *mem = (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int));        /* member node indices */
+  flow_pt *out = (flow_pt*)FLOW_MALLOC((size_t)f->nnodes * sizeof(flow_pt));
+  flow__lay_edge *ed = f->nedges ? (flow__lay_edge*)FLOW_MALLOC((size_t)f->nedges * sizeof *ed) : NULL;
   flow__undo_begin(f);                                  /* the WHOLE layout = ONE undo step */
   for (int pi = 0; pi < np; pi++) {
     int p = plist[pi], m = 0;
@@ -310,7 +310,7 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
                      (flow_pt){ pa.x + out[i].x + bx, pa.y + out[i].y + by });
   }
   flow__undo_end(f);
-  free(plist); free(pdepth); free(mem); free(out); free(ed);
+  FLOW_FREE(plist); FLOW_FREE(pdepth); FLOW_FREE(mem); FLOW_FREE(out); FLOW_FREE(ed);
   if (opts.fit_after) flow_fit_view(f, opts.margin);    /* viewport untouched without it */
 }
 void flow_layout_force(flow_t *f, flow_force_opts opts) {

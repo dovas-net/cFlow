@@ -54,6 +54,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+/* Allocator + assert hooks (stb convention). To route flow's heap through your own
+   arena/tracker, #define ALL FOUR of FLOW_MALLOC/CALLOC/REALLOC/FREE before including
+   flow.h (override the set together — they must pair). Buffers flow returns to you
+   (e.g. flow_render_diff / flow_save strings) are then yours to release with the SAME
+   allocator. FLOW_ASSERT defaults to assert(); #define it (even to a no-op) to override. */
+#ifndef FLOW_MALLOC
+#define FLOW_MALLOC(sz)      malloc(sz)
+#define FLOW_CALLOC(n, sz)   calloc(n, sz)
+#define FLOW_REALLOC(p, sz)  realloc(p, sz)
+#define FLOW_FREE(p)         free(p)
+#endif
+#ifndef FLOW_ASSERT
+#include <assert.h>
+#define FLOW_ASSERT(x)       assert(x)
+#endif
 /* ===================== src/flow_geom.h ===================== */
 /* ===== geometry (pure, no I/O) ===== */
 typedef struct { int x, y; } flow_pt;
@@ -213,11 +228,11 @@ int flow_surface_w(const flow_surface *s) { return s->w; }
 int flow_surface_h(const flow_surface *s) { return s->h; }
 
 static void flow__sb(char **out, size_t *cap, size_t *len, const char *s, int n) {
-  if (*len + (size_t)n + 1 > *cap) { while (*len + (size_t)n + 1 > *cap) *cap *= 2; *out = (char*)realloc(*out, *cap); }
+  if (*len + (size_t)n + 1 > *cap) { while (*len + (size_t)n + 1 > *cap) *cap *= 2; *out = (char*)FLOW_REALLOC(*out, *cap); }
   memcpy(*out + *len, s, n); *len += n; (*out)[*len] = 0;
 }
 char *flow_diff_emit(const flow_cell *front, const flow_cell *back, int cols, int rows) {
-  size_t cap = 64, len = 0; char *out = (char*)malloc(cap); out[0] = 0;
+  size_t cap = 64, len = 0; char *out = (char*)FLOW_MALLOC(cap); out[0] = 0;
   int cury = -1, curx = -1, have_style = 0; uint8_t lfg = 0, lbg = 0, lattr = 0;
   char tmp[64], u[5];
   for (int y = 0; y < rows; y++) for (int x = 0; x < cols; x++) {
@@ -719,27 +734,27 @@ struct flow {
 static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
   if (need <= *cap) return arr;
   int c = *cap ? *cap : 8; while (c < need) c *= 2;
-  arr = realloc(arr, (size_t)c * sz); *cap = c; return arr;
+  arr = FLOW_REALLOC(arr, (size_t)c * sz); *cap = c; return arr;
 }
 /* ---- undo journal: recording primitives (PURE DATA — never call mutators, so they are
    safe to invoke from this module; the appliers live in flow_undo.h, after flow_model) ---- */
 static char *flow__dup(const char *s) {            /* malloc+memcpy (codebase avoids strdup under -std=c11) */
   if (!s) return NULL;
-  size_t n = strlen(s) + 1; char *d = (char*)malloc(n); if (d) memcpy(d, s, n); return d;
+  size_t n = strlen(s) + 1; char *d = (char*)FLOW_MALLOC(n); if (d) memcpy(d, s, n); return d;
 }
 static void flow__op_free(flow__op *op) {          /* frees owned label copies; NEVER frees node->data */
   switch (op->kind) {
     case FLOW_CMD_REMOVE_NODE:
-      for (int i = 0; i < op->u.subtree.ne; i++) free(op->u.subtree.edges[i].label_copy);
-      free(op->u.subtree.nodes); free(op->u.subtree.edges); break;
-    case FLOW_CMD_ADD_EDGE: case FLOW_CMD_REMOVE_EDGE: free(op->u.edge.snap.label_copy); break;
-    case FLOW_CMD_SET_LABEL: free(op->u.label.from); free(op->u.label.to); break;
+      for (int i = 0; i < op->u.subtree.ne; i++) FLOW_FREE(op->u.subtree.edges[i].label_copy);
+      FLOW_FREE(op->u.subtree.nodes); FLOW_FREE(op->u.subtree.edges); break;
+    case FLOW_CMD_ADD_EDGE: case FLOW_CMD_REMOVE_EDGE: FLOW_FREE(op->u.edge.snap.label_copy); break;
+    case FLOW_CMD_SET_LABEL: FLOW_FREE(op->u.label.from); FLOW_FREE(op->u.label.to); break;
     default: break;
   }
 }
 static void flow__cmd_free(struct flow__cmd *c) {
   for (int i = 0; i < c->nops; i++) flow__op_free(&c->ops[i]);
-  free(c->ops);
+  FLOW_FREE(c->ops);
 }
 static void flow__redo_clear(flow_t *f) {
   for (int i = 0; i < f->journal.rn; i++) flow__cmd_free(&f->journal.redo[i]);
@@ -749,9 +764,9 @@ static void flow__redo_clear(flow_t *f) {
    not invert against a replaced graph) */
 static void flow__journal_clear(flow_t *f) {
   for (int i = 0; i < f->journal.n; i++) flow__cmd_free(&f->journal.items[i]);
-  free(f->journal.items); f->journal.items = NULL; f->journal.n = f->journal.cap = 0;
+  FLOW_FREE(f->journal.items); f->journal.items = NULL; f->journal.n = f->journal.cap = 0;
   flow__redo_clear(f);
-  free(f->journal.redo); f->journal.redo = NULL; f->journal.rcap = 0;
+  FLOW_FREE(f->journal.redo); f->journal.redo = NULL; f->journal.rcap = 0;
   f->journal.txn_depth = 0; f->journal.txn_base = -1;
 }
 static int flow__rec_gate(flow_t *f) {             /* every record call is gated on this */
@@ -852,8 +867,8 @@ static void flow__rec_remove_node(flow_t *f, int id) {
   for (int i = 0; i < f->nnodes; i++) if (flow_is_ancestor(f, id, f->nodes[i].id)) nn++;
   for (int i = 0; i < f->nedges; i++)
     if (flow_is_ancestor(f, id, f->edges[i].source) || flow_is_ancestor(f, id, f->edges[i].target)) ne++;
-  op.u.subtree.nodes = nn ? (flow__node_snap*)malloc((size_t)nn * sizeof(flow__node_snap)) : NULL;
-  op.u.subtree.edges = ne ? (flow__edge_snap*)malloc((size_t)ne * sizeof(flow__edge_snap)) : NULL;
+  op.u.subtree.nodes = nn ? (flow__node_snap*)FLOW_MALLOC((size_t)nn * sizeof(flow__node_snap)) : NULL;
+  op.u.subtree.edges = ne ? (flow__edge_snap*)FLOW_MALLOC((size_t)ne * sizeof(flow__edge_snap)) : NULL;
   for (int i = 0; i < f->nnodes; i++) {
     if (!flow_is_ancestor(f, id, f->nodes[i].id)) continue;
     flow__node_snap *s = &op.u.subtree.nodes[op.u.subtree.nn++];
@@ -893,7 +908,7 @@ static void flow__rec_reparent(flow_t *f, int child, int from_parent, flow_pt fr
   flow__rec_push(f, op);
 }
 flow_t *flow_new(int cols, int rows) {
-  flow_t *f = (flow_t*)calloc(1, sizeof *f);
+  flow_t *f = (flow_t*)FLOW_CALLOC(1, sizeof *f);
   f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1; f->focus_node = -1;
@@ -904,7 +919,7 @@ flow_t *flow_new(int cols, int rows) {
   f->tick_ms = 100;                                            /* inc-6 #4: 10 Hz redraw when armed; tick stays calloc-zero */
   flow_set_color_mode(f, FLOW_COLOR_DEFAULT);                  /* inc-7 #1: seed the legacy 7/0/8 preset (calloc-zero would be black-on-black) */
   f->journal.limit = 128; f->journal.txn_base = -1;
-  f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
+  f->front = (flow_cell*)FLOW_CALLOC((size_t)cols * rows, sizeof(flow_cell));
   return f;
 }
 /* free the clipboard's owned memory: each edge snap's label_copy + the arrays.
@@ -912,8 +927,8 @@ flow_t *flow_new(int cols, int rows) {
    flow_free and from copy (replace-on-copy); deliberately NOT from
    flow__graph_reset — the clipboard is not graph state and survives flow_load. */
 static void flow__clipboard_clear(flow_t *f) {
-  for (int i = 0; i < f->clip.ne; i++) free(f->clip.edges[i].label_copy);
-  free(f->clip.nodes); free(f->clip.edges);
+  for (int i = 0; i < f->clip.ne; i++) FLOW_FREE(f->clip.edges[i].label_copy);
+  FLOW_FREE(f->clip.nodes); FLOW_FREE(f->clip.edges);
   f->clip.nodes = NULL; f->clip.edges = NULL;
   f->clip.nn = f->clip.ne = 0; f->clip.gen = 0;
 }
@@ -921,8 +936,8 @@ void flow_free(flow_t *f) {
   if (!f) return;
   flow__journal_clear(f);   /* frees command label copies + stacks; drops (never frees) node->data */
   flow__clipboard_clear(f); /* clipboard label copies + arrays (inc-5 #7) */
-  for (int i = 0; i < f->nedges; i++) free(f->edges[i].label);
-  free(f->nodes); free(f->edges); free(f->ntypes); free(f->etypes); free(f->front); free(f);
+  for (int i = 0; i < f->nedges; i++) FLOW_FREE(f->edges[i].label);
+  FLOW_FREE(f->nodes); FLOW_FREE(f->edges); FLOW_FREE(f->ntypes); FLOW_FREE(f->etypes); FLOW_FREE(f->front); FLOW_FREE(f);
 }
 /* Tear the graph back to empty for flow_load: free edge labels + node/edge arrays,
    NULL the pointers, zero counts/caps, reset id counters. Leaves view/types/cb/widgets
@@ -931,8 +946,8 @@ void flow_free(flow_t *f) {
    replaced graph; flow_load additionally suppresses recording across its rebuild. */
 static void flow__graph_reset(flow_t *f) {
   flow__journal_clear(f);
-  for (int i = 0; i < f->nedges; i++) free(f->edges[i].label);
-  free(f->nodes); free(f->edges);
+  for (int i = 0; i < f->nedges; i++) FLOW_FREE(f->edges[i].label);
+  FLOW_FREE(f->nodes); FLOW_FREE(f->edges);
   f->nodes = NULL; f->edges = NULL;
   f->nnodes = f->capnodes = 0; f->nedges = f->capedges = 0;
   f->nextid = 1; f->nexteid = 1;
@@ -940,15 +955,15 @@ static void flow__graph_reset(flow_t *f) {
   f->last_click_edge = -1;   /* same for the edge dblclick pair */
 }
 void flow_resize(flow_t *f, int cols, int rows) {
-  f->cols = cols; f->rows = rows; free(f->front);
-  f->front = (flow_cell*)calloc((size_t)cols * rows, sizeof(flow_cell));
+  f->cols = cols; f->rows = rows; FLOW_FREE(f->front);
+  f->front = (flow_cell*)FLOW_CALLOC((size_t)cols * rows, sizeof(flow_cell));
 }
 void flow_register_node_type(flow_t *f, const flow_node_type *t) {
-  f->ntypes = (const flow_node_type**)realloc(f->ntypes, (f->nntypes + 1) * sizeof *f->ntypes);
+  f->ntypes = (const flow_node_type**)FLOW_REALLOC(f->ntypes, (f->nntypes + 1) * sizeof *f->ntypes);
   f->ntypes[f->nntypes++] = t;
 }
 void flow_register_edge_type(flow_t *f, const flow_edge_type *t) {
-  f->etypes = (const flow_edge_type**)realloc(f->etypes, (f->netypes + 1) * sizeof *f->etypes);
+  f->etypes = (const flow_edge_type**)FLOW_REALLOC(f->etypes, (f->netypes + 1) * sizeof *f->etypes);
   f->etypes[f->netypes++] = t;
 }
 const flow_node_type *flow_node_type_for(flow_t *f, const char *type) {
@@ -1260,16 +1275,16 @@ static int flow__order_cmp_hit(const void *pa, const void *pb) {
 /* Allocate + fill an ordered index list (length f->nnodes). Returns NULL when empty. */
 static int *flow__node_order(flow_t *f, int want_render) {
   if (f->nnodes <= 0) return NULL;
-  flow__order_ent *ents = (flow__order_ent*)malloc((size_t)f->nnodes * sizeof *ents);
+  flow__order_ent *ents = (flow__order_ent*)FLOW_MALLOC((size_t)f->nnodes * sizeof *ents);
   if (!ents) return NULL;
   for (int i = 0; i < f->nnodes; i++) {
     ents[i].idx = i; ents[i].depth = flow__node_depth(f, &f->nodes[i]);
     ents[i].sel = (f->nodes[i].flags & FLOW_SELECTED) ? 1 : 0;
   }
   qsort(ents, (size_t)f->nnodes, sizeof *ents, want_render ? flow__order_cmp_render : flow__order_cmp_hit);
-  int *order = (int*)malloc((size_t)f->nnodes * sizeof(int));
+  int *order = (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int));
   if (order) for (int i = 0; i < f->nnodes; i++) order[i] = ents[i].idx;
-  free(ents);
+  FLOW_FREE(ents);
   return order;
 }
 int flow_hit_node(flow_t *f, flow_pt screen) {
@@ -1282,7 +1297,7 @@ int flow_hit_node(flow_t *f, flow_pt screen) {
     flow_rect sr = flow__node_footprint(f, n, lod);   /* exact footprint the renderer draws */
     if (flow_rect_contains(sr, screen)) { hit = n->id; break; }
   }
-  free(order);
+  FLOW_FREE(order);
   return hit;
 }
 void flow_pan(flow_t *f, int dx, int dy) { flow__view_set(f, f->view.ox + dx, f->view.oy + dy, f->view.zoom); }
@@ -1304,10 +1319,10 @@ static void flow__notify_selection(flow_t *f, unsigned long sig_before) {
   if (!f->cb.on_selection_change || f->cb_suppress) return;
   if (flow__sel_sig(f) == sig_before) return;
   int n = flow_selected_count(f);
-  int *ids = n > 0 ? (int*)malloc((size_t)n * sizeof(int)) : NULL;
+  int *ids = n > 0 ? (int*)FLOW_MALLOC((size_t)n * sizeof(int)) : NULL;
   if (n > 0) flow_selected_nodes(f, ids, n);
   f->cb.on_selection_change(f, ids, n, f->cb.user);
-  free(ids);
+  FLOW_FREE(ids);
 }
 /* 1 if node `id` is selected or has a selected ancestor — i.e. it will be removed when the
    current selection is deleted (flow_remove_node cascades a selected node's descendants). */
@@ -1440,10 +1455,10 @@ void flow_reconnect_edge(flow_t *f, int edge, int endpoint_node, const char *han
 void flow_set_edge_label(flow_t *f, int edge, const char *label) {
   flow_edge *e = flow_get_edge(f, edge); if (!e) return;
   if (flow__rec_gate(f)) flow__rec_set_label(f, edge, e->label, label);  /* dup the OLD label BEFORE freeing it */
-  free(e->label); e->label = NULL;
+  FLOW_FREE(e->label); e->label = NULL;
   if (label) {                                                 /* malloc+memcpy (avoid strdup decl issues under -std=c11) */
     size_t n = strlen(label) + 1;
-    e->label = (char*)malloc(n);
+    e->label = (char*)FLOW_MALLOC(n);
     if (e->label) memcpy(e->label, label, n);
   }
 }
@@ -1451,7 +1466,7 @@ void flow_remove_edge(flow_t *f, int id) {
   for (int i = 0; i < f->nedges; i++) {
     if (f->edges[i].id != id) continue;
     if (flow__rec_gate(f)) flow__rec_remove_edge(f, &f->edges[i], i);  /* snapshot (dup'd label) before freeing */
-    free(f->edges[i].label);                                  /* free-then-shift: no leak, no dbl-free */
+    FLOW_FREE(f->edges[i].label);                                  /* free-then-shift: no leak, no dbl-free */
     memmove(&f->edges[i], &f->edges[i+1], (size_t)(f->nedges - i - 1) * sizeof(flow_edge));
     f->nedges--;                                              /* preserve insertion order */
     return;
@@ -1472,11 +1487,11 @@ void flow_remove_node(flow_t *f, int id) {
   if (top) {
     sig = flow__sel_sig(f);
     if (f->cb.on_nodes_delete) {
-      int *ids = f->nnodes ? (int*)malloc((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+      int *ids = f->nnodes ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
       for (int i = 0; i < f->nnodes; i++)
         if (flow_is_ancestor(f, id, f->nodes[i].id)) ids[n++] = f->nodes[i].id; /* id and its descendants */
       if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
-      free(ids);
+      FLOW_FREE(ids);
     }
   }
   f->cb_suppress++; f->journal.suppress++;
@@ -1489,7 +1504,7 @@ void flow_remove_node(flow_t *f, int id) {
   }
   for (int i = 0; i < f->nedges; ) {                          /* remove incident edges, freeing labels */
     if (f->edges[i].source == id || f->edges[i].target == id) {
-      free(f->edges[i].label);
+      FLOW_FREE(f->edges[i].label);
       memmove(&f->edges[i], &f->edges[i+1], (size_t)(f->nedges - i - 1) * sizeof(flow_edge));
       f->nedges--;                                            /* do NOT i++ on the removal branch */
     } else i++;
@@ -1520,11 +1535,11 @@ void flow_delete_selection(flow_t *f) {
   for (int i = 0; i < f->nnodes; i++)
     if (f->nodes[i].flags & FLOW_NODELETE) f->nodes[i].flags &= ~(unsigned)FLOW_SELECTED;
   if (f->cb.on_nodes_delete) {
-    int *ids = f->nnodes ? (int*)malloc((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+    int *ids = f->nnodes ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
     for (int i = 0; i < f->nnodes; i++)
       if (flow__sel_or_ancestor(f, f->nodes[i].id)) ids[n++] = f->nodes[i].id;
     if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
-    free(ids);
+    FLOW_FREE(ids);
   }
   flow__undo_begin(f);  /* every removed root's subtree command coalesces into ONE undo step */
   f->cb_suppress++;
@@ -1560,8 +1575,8 @@ static void flow__snap_selection(flow_t *f, flow__node_snap **on, int *onn,
   for (int i = 0; i < f->nedges; i++)
     if (flow__clip_endpoint_selected(f, f->edges[i].source) &&
         flow__clip_endpoint_selected(f, f->edges[i].target)) ne++;
-  flow__node_snap *ns = nn ? (flow__node_snap*)malloc((size_t)nn * sizeof *ns) : NULL;
-  flow__edge_snap *es = ne ? (flow__edge_snap*)malloc((size_t)ne * sizeof *es) : NULL;
+  flow__node_snap *ns = nn ? (flow__node_snap*)FLOW_MALLOC((size_t)nn * sizeof *ns) : NULL;
+  flow__edge_snap *es = ne ? (flow__edge_snap*)FLOW_MALLOC((size_t)ne * sizeof *es) : NULL;
   int k = 0;
   for (int i = 0; i < f->nnodes; i++) {
     if (!(f->nodes[i].flags & FLOW_SELECTED)) continue;
@@ -1592,7 +1607,7 @@ static int flow__paste_snaps(flow_t *f, const flow__node_snap *ns, int nn,
                              const flow__edge_snap *es, int ne, int off) {
   if (nn == 0) return 0;
   unsigned long sig = flow__sel_sig(f);
-  int *newid = (int*)malloc((size_t)nn * sizeof(int));
+  int *newid = (int*)FLOW_MALLOC((size_t)nn * sizeof(int));
   flow__undo_begin(f);
   f->cb_suppress++;                                          /* one notify at the end */
   for (int i = 0; i < nn; i++) {
@@ -1638,7 +1653,7 @@ static int flow__paste_snaps(flow_t *f, const flow__node_snap *ns, int nn,
   f->cb_suppress--;
   flow__undo_end(f);
   flow__notify_selection(f, sig);                            /* node-only sig changed: fires once */
-  free(newid);
+  FLOW_FREE(newid);
   return nn;
 }
 void flow_copy_selection(flow_t *f) {
@@ -1660,8 +1675,8 @@ int flow_duplicate_selection(flow_t *f) {
   flow__node_snap *ns; flow__edge_snap *es; int nn, ne;
   flow__snap_selection(f, &ns, &nn, &es, &ne);               /* LOCAL temp: f->clip untouched */
   int r = flow__paste_snaps(f, ns, nn, es, ne, 1);
-  for (int i = 0; i < ne; i++) free(es[i].label_copy);
-  free(ns); free(es);
+  for (int i = 0; i < ne; i++) FLOW_FREE(es[i].label_copy);
+  FLOW_FREE(ns); FLOW_FREE(es);
   return r;
 }
 /* getViewportForBounds: pick a zoom that makes rect b fit inside the usable area
@@ -2091,7 +2106,7 @@ static void flow__remove_node_slot(flow_t *f, int id) {
 static void flow__remove_edge_slot(flow_t *f, int id) {
   for (int i = 0; i < f->nedges; i++) {
     if (f->edges[i].id != id) continue;
-    free(f->edges[i].label);
+    FLOW_FREE(f->edges[i].label);
     memmove(&f->edges[i], &f->edges[i + 1], (size_t)(f->nedges - i - 1) * sizeof(flow_edge));
     f->nedges--;
     return;
@@ -2128,7 +2143,7 @@ static void flow__apply_op(flow_t *f, flow__op *op, int redo) {
       else {
         flow_edge *e = flow_get_edge(f, op->u.edge.snap.id);
         if (e) {                                      /* refresh snap (label re-dup'd) for the next redo */
-          free(op->u.edge.snap.label_copy);
+          FLOW_FREE(op->u.edge.snap.label_copy);
           op->u.edge.snap.edge = *e;
           op->u.edge.snap.label_copy = flow__dup(e->label);
           op->u.edge.snap.edge.label = op->u.edge.snap.label_copy;
@@ -2442,22 +2457,22 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
                                  const flow__lay_edge *ed, int ne,
                                  flow_layered_dir dir, int gx, int gy, flow_pt *out) {
   /* out-adjacency in edge-array order (offset/list form keeps edge order) */
-  int *outdeg = (int*)calloc((size_t)m, sizeof(int));
-  int *adjoff = (int*)malloc((size_t)(m + 1) * sizeof(int));
-  int *adjlist = ne ? (int*)malloc((size_t)ne * sizeof(int)) : NULL;
-  char *drop = (char*)calloc((size_t)(ne ? ne : 1), 1);
+  int *outdeg = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
+  int *adjoff = (int*)FLOW_MALLOC((size_t)(m + 1) * sizeof(int));
+  int *adjlist = ne ? (int*)FLOW_MALLOC((size_t)ne * sizeof(int)) : NULL;
+  char *drop = (char*)FLOW_CALLOC((size_t)(ne ? ne : 1), 1);
   for (int e = 0; e < ne; e++) outdeg[ed[e].a]++;
   adjoff[0] = 0;
   for (int v = 0; v < m; v++) adjoff[v + 1] = adjoff[v] + outdeg[v];
-  { int *cur = (int*)calloc((size_t)m, sizeof(int));
+  { int *cur = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
     for (int e = 0; e < ne; e++) adjlist[adjoff[ed[e].a] + cur[ed[e].a]++] = e;
-    free(cur); }
+    FLOW_FREE(cur); }
   /* (1) back-edge drop: iterative DFS, roots and out-edges in index/edge order.
      An edge into an ON-STACK node closes a cycle -> dropped (deterministically,
      by traversal order) so rank assignment can never loop. */
-  char *state = (char*)calloc((size_t)m, 1);            /* 0 unvisited, 1 on-stack, 2 done */
-  int *stkv = (int*)malloc((size_t)m * sizeof(int));
-  int *stke = (int*)malloc((size_t)m * sizeof(int));
+  char *state = (char*)FLOW_CALLOC((size_t)m, 1);            /* 0 unvisited, 1 on-stack, 2 done */
+  int *stkv = (int*)FLOW_MALLOC((size_t)m * sizeof(int));
+  int *stke = (int*)FLOW_MALLOC((size_t)m * sizeof(int));
   for (int r = 0; r < m; r++) {
     if (state[r]) continue;
     int sp = 0; stkv[0] = r; stke[0] = 0; state[r] = 1; sp = 1;
@@ -2472,9 +2487,9 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
     }
   }
   /* (2) longest-path ranks: Kahn over kept edges, smallest ready index first */
-  int *indeg = (int*)calloc((size_t)m, sizeof(int));
-  int *rank = (int*)calloc((size_t)m, sizeof(int));
-  char *done = (char*)calloc((size_t)m, 1);
+  int *indeg = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
+  int *rank = (int*)FLOW_CALLOC((size_t)m, sizeof(int));
+  char *done = (char*)FLOW_CALLOC((size_t)m, 1);
   for (int e = 0; e < ne; e++) if (!drop[e]) indeg[ed[e].b]++;
   for (int processed = 0; processed < m; processed++) {
     int v = -1;
@@ -2493,17 +2508,17 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
   for (int i = 0; i < m; i++) if (rank[i] > maxrank) maxrank = rank[i];
   int R = maxrank + 1;
   /* (3) rank buckets (initial order: ascending local index) + barycenter sweeps */
-  int *rcount = (int*)calloc((size_t)R, sizeof(int));
-  int *roff = (int*)malloc((size_t)(R + 1) * sizeof(int));
-  int *rlist = (int*)malloc((size_t)m * sizeof(int));
-  int *pos = (int*)malloc((size_t)m * sizeof(int));     /* node -> position within its rank */
+  int *rcount = (int*)FLOW_CALLOC((size_t)R, sizeof(int));
+  int *roff = (int*)FLOW_MALLOC((size_t)(R + 1) * sizeof(int));
+  int *rlist = (int*)FLOW_MALLOC((size_t)m * sizeof(int));
+  int *pos = (int*)FLOW_MALLOC((size_t)m * sizeof(int));     /* node -> position within its rank */
   for (int i = 0; i < m; i++) rcount[rank[i]]++;
   roff[0] = 0;
   for (int r = 0; r < R; r++) roff[r + 1] = roff[r] + rcount[r];
-  { int *cur = (int*)calloc((size_t)R, sizeof(int));
+  { int *cur = (int*)FLOW_CALLOC((size_t)R, sizeof(int));
     for (int i = 0; i < m; i++) { int r = rank[i]; rlist[roff[r] + cur[r]] = i; pos[i] = cur[r]++; }
-    free(cur); }
-  flow__lay_ord *ord = (flow__lay_ord*)malloc((size_t)m * sizeof *ord);
+    FLOW_FREE(cur); }
+  flow__lay_ord *ord = (flow__lay_ord*)FLOW_MALLOC((size_t)m * sizeof *ord);
   for (int sweep = 0; sweep < 4; sweep++) {             /* alternate down/up sweeps */
     int down = !(sweep & 1);
     for (int rr = 0; rr < R; rr++) {
@@ -2530,8 +2545,8 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
   /* (4) integer coordinates. Flow axis: ranks march by max extent + gap (LR: gap_x,
      TB: gap_y). Cross axis: stack by extent + the other gap, centering each rank
      against the tallest/widest one (integer division — deterministic). */
-  int *ext = (int*)calloc((size_t)R, sizeof(int));      /* per-rank flow-axis extent */
-  int *tot = (int*)calloc((size_t)R, sizeof(int));      /* per-rank cross-axis total */
+  int *ext = (int*)FLOW_CALLOC((size_t)R, sizeof(int));      /* per-rank flow-axis extent */
+  int *tot = (int*)FLOW_CALLOC((size_t)R, sizeof(int));      /* per-rank cross-axis total */
   int maxtot = 0;
   for (int r = 0; r < R; r++) {
     for (int i = 0; i < rcount[r]; i++) {
@@ -2554,9 +2569,9 @@ static void flow__layout_layered(flow_t *f, const int *mem, int m,
     }
     off += ext[r] + (dir == FLOW_LR ? gx : gy);
   }
-  free(outdeg); free(adjoff); free(adjlist); free(drop); free(state); free(stkv); free(stke);
-  free(indeg); free(rank); free(done); free(rcount); free(roff); free(rlist); free(pos);
-  free(ord); free(ext); free(tot);
+  FLOW_FREE(outdeg); FLOW_FREE(adjoff); FLOW_FREE(adjlist); FLOW_FREE(drop); FLOW_FREE(state); FLOW_FREE(stkv); FLOW_FREE(stke);
+  FLOW_FREE(indeg); FLOW_FREE(rank); FLOW_FREE(done); FLOW_FREE(rcount); FLOW_FREE(roff); FLOW_FREE(rlist); FLOW_FREE(pos);
+  FLOW_FREE(ord); FLOW_FREE(ext); FLOW_FREE(tot);
 }
 
 /* FORCE (Fruchterman-Reingold): deterministic circular initial placement by local
@@ -2582,10 +2597,10 @@ static void flow__layout_force(flow_t *f, const int *mem, int m,
     if (k < 8.0f) k = 8.0f;
   }
   float grav = o->gravity > 0.0f ? o->gravity : 0.05f;
-  float *px = (float*)malloc((size_t)m * sizeof(float));
-  float *py = (float*)malloc((size_t)m * sizeof(float));
-  float *dx = (float*)malloc((size_t)m * sizeof(float));
-  float *dy = (float*)malloc((size_t)m * sizeof(float));
+  float *px = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
+  float *py = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
+  float *dx = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
+  float *dy = (float*)FLOW_MALLOC((size_t)m * sizeof(float));
   float R = k * (float)m / 6.2831853f;                  /* ~k of arc between neighbors */
   if (R < k) R = k;
   for (int i = 0; i < m; i++) {
@@ -2634,7 +2649,7 @@ static void flow__layout_force(flow_t *f, const int *mem, int m,
     out[i].x = (int)lroundf(px[i] - (float)n->w / 2.0f);
     out[i].y = (int)lroundf(py[i] - (float)n->h / 2.0f);
   }
-  free(px); free(py); free(dx); free(dy);
+  FLOW_FREE(px); FLOW_FREE(py); FLOW_FREE(dx); FLOW_FREE(dy);
 }
 
 void flow_layout(flow_t *f, flow_layout_opts opts) {
@@ -2647,8 +2662,8 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
      parent_abs. (flow_group appends containers AFTER their children, so first
      appearance alone would visit the children's partition too early.) */
   int np = 0;
-  int *plist = (int*)malloc((size_t)f->nnodes * sizeof(int));
-  int *pdepth = (int*)malloc((size_t)f->nnodes * sizeof(int));
+  int *plist = (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int));
+  int *pdepth = (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int));
   for (int i = 0; i < f->nnodes; i++) {
     int p = f->nodes[i].parent, seen = 0;
     for (int j = 0; j < np; j++) if (plist[j] == p) { seen = 1; break; }
@@ -2661,9 +2676,9 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
       int tp = plist[j]; plist[j] = plist[j - 1]; plist[j - 1] = tp;
       int td = pdepth[j]; pdepth[j] = pdepth[j - 1]; pdepth[j - 1] = td;
     }
-  int *mem = (int*)malloc((size_t)f->nnodes * sizeof(int));        /* member node indices */
-  flow_pt *out = (flow_pt*)malloc((size_t)f->nnodes * sizeof(flow_pt));
-  flow__lay_edge *ed = f->nedges ? (flow__lay_edge*)malloc((size_t)f->nedges * sizeof *ed) : NULL;
+  int *mem = (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int));        /* member node indices */
+  flow_pt *out = (flow_pt*)FLOW_MALLOC((size_t)f->nnodes * sizeof(flow_pt));
+  flow__lay_edge *ed = f->nedges ? (flow__lay_edge*)FLOW_MALLOC((size_t)f->nedges * sizeof *ed) : NULL;
   flow__undo_begin(f);                                  /* the WHOLE layout = ONE undo step */
   for (int pi = 0; pi < np; pi++) {
     int p = plist[pi], m = 0;
@@ -2693,7 +2708,7 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
                      (flow_pt){ pa.x + out[i].x + bx, pa.y + out[i].y + by });
   }
   flow__undo_end(f);
-  free(plist); free(pdepth); free(mem); free(out); free(ed);
+  FLOW_FREE(plist); FLOW_FREE(pdepth); FLOW_FREE(mem); FLOW_FREE(out); FLOW_FREE(ed);
   if (opts.fit_after) flow_fit_view(f, opts.margin);    /* viewport untouched without it */
 }
 void flow_layout_force(flow_t *f, flow_force_opts opts) {
@@ -2722,12 +2737,12 @@ const flow_edge_type flow_default_edge_type  = { "default",  flow_route_orthogon
 const flow_edge_type flow_straight_edge_type = { "straight", flow_route_straight };
 
 void flow_route_push(flow_route *r, int x, int y, uint32_t ch) {
-  if (r->count >= r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->cells = (flow_route_cell*)realloc(r->cells, r->cap * sizeof *r->cells); }
+  if (r->count >= r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->cells = (flow_route_cell*)FLOW_REALLOC(r->cells, r->cap * sizeof *r->cells); }
   r->cells[r->count].x = x; r->cells[r->count].y = y; r->cells[r->count].ch = ch; r->count++;
 }
 static void flow__addpt(flow_pt **a, int *n, int *cap, int x, int y) {
   if (*n > 0 && (*a)[*n-1].x == x && (*a)[*n-1].y == y) return;
-  if (*n >= *cap) { *cap = *cap ? *cap * 2 : 32; *a = (flow_pt*)realloc(*a, *cap * sizeof(flow_pt)); }
+  if (*n >= *cap) { *cap = *cap ? *cap * 2 : 32; *a = (flow_pt*)FLOW_REALLOC(*a, *cap * sizeof(flow_pt)); }
   (*a)[*n].x = x; (*a)[*n].y = y; (*n)++;
 }
 /* direction bit from delta (neighbor relative to cell): N=1 S=2 E=4 W=8 */
@@ -2773,7 +2788,7 @@ void flow_route_orthogonal(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_
     out->cells[out->count - 1].ch = arrow;
     out->label_anchor = p[n/2];
   }
-  free(p);
+  FLOW_FREE(p);
 }
 /* STRAIGHT: direct integer-DDA line s->t, stepping the dominant axis by one cell
    per step (diagonal steps allowed). Glyphs: ─ horizontal, │ vertical, ╲/╱ diagonal.
@@ -3024,7 +3039,7 @@ int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
       if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
       if ((dx > dy ? dx : dy) <= tol) { hit = 1; break; }     /* Chebyshev distance */
     }
-    free(rt.cells);
+    FLOW_FREE(rt.cells);
     if (hit) return e->id;
   }
   return -1;
@@ -3141,7 +3156,7 @@ static void flow__edge_toolbar(flow_t *f, flow_cellbuf *cb) {
   flow_route rt = {0};
   et->route(ss, sp, ts, tp, &rt);
   flow_pt anchor = rt.label_anchor;
-  free(rt.cells);                                   /* anchor copied out; every later return is leak-free */
+  FLOW_FREE(rt.cells);                                   /* anchor copied out; every later return is leak-free */
   int total = 0;
   for (int k = 0; k < f->edge_toolbar.n; k++) { total += flow__label_cells(f->edge_toolbar.actions[k].label); if (k) total += 1; }
   if (total <= 0) return;
@@ -3210,7 +3225,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n;
         flow_cellbuf_put(&cb, gx++, rt.label_anchor.y, cp, f->theme.edge_fg, f->theme.bg, attr); }
     }
-    free(rt.cells);
+    FLOW_FREE(rt.cells);
   }
 
   /* nodes on top — visited in depth-aware order (parent-before-child DOMINATES;
@@ -3244,7 +3259,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       flow_render_ctx ctx = { f->view.zoom, n->flags, lod };
       nt->render(n, &surf, ctx);
     }
-    free(order);
+    FLOW_FREE(order);
   }
 
   /* handle markers: only on hovered/selected nodes (xyflow reveals on hover), plus
@@ -3307,7 +3322,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       for (int c = 0; c < last; c++)
         if (((rt.cells[c].x + rt.cells[c].y) & 1) == 0)        /* dashed: every other cell */
           flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, f->theme.edge_fg, f->theme.bg, 0);
-      free(rt.cells);
+      FLOW_FREE(rt.cells);
     }
   }
 
@@ -3672,7 +3687,7 @@ int flow_load(flow_t *f, const char *path) {
   long sz = ftell(in);
   if (sz < 0) { fclose(in); return -1; }
   if (fseek(in, 0, SEEK_SET) != 0) { fclose(in); return -1; }
-  char *buf = (char*)malloc((size_t)sz + 1);
+  char *buf = (char*)FLOW_MALLOC((size_t)sz + 1);
   if (!buf) { fclose(in); return -1; }
   size_t got = fread(buf, 1, (size_t)sz, in);
   fclose(in);
@@ -3680,7 +3695,7 @@ int flow_load(flow_t *f, const char *path) {
   const char *root = buf, *end = buf + got;
 
   /* (2) validate structure BEFORE touching f — malformed => -1, graph untouched. */
-  if (!flow__json_valid(root, end)) { free(buf); return -1; }
+  if (!flow__json_valid(root, end)) { FLOW_FREE(buf); return -1; }
 
   /* (3) only now wipe the graph and rebuild. flow__graph_reset clears the undo journal
      (undo must not invert against a replaced graph) and the rebuild below runs with
@@ -3754,8 +3769,8 @@ int flow_load(flow_t *f, const char *path) {
         if (flow__json_find(elem, eend, "data", &dv)) {
           const char *ds; int dl;
           if (flow__json_raw(dv, &ds, &dl)) {
-            char *copy = (char*)malloc((size_t)dl + 1);
-            if (copy) { memcpy(copy, ds, (size_t)dl); copy[dl] = 0; t->load(n, copy); free(copy); }
+            char *copy = (char*)FLOW_MALLOC((size_t)dl + 1);
+            if (copy) { memcpy(copy, ds, (size_t)dl); copy[dl] = 0; t->load(n, copy); FLOW_FREE(copy); }
           }
         }
       }
@@ -3789,7 +3804,7 @@ int flow_load(flow_t *f, const char *path) {
         char lbl[1024];
         if (flow__json_strv(lf, lbl, (int)sizeof lbl)) {
           size_t ln = strlen(lbl) + 1;
-          e->label = (char*)malloc(ln);
+          e->label = (char*)FLOW_MALLOC(ln);
           if (e->label) memcpy(e->label, lbl, ln);
         }
       }
@@ -3802,7 +3817,7 @@ int flow_load(flow_t *f, const char *path) {
 
   f->validator_fn = saved_vfn; f->validator_user = saved_vuser;
   f->journal.suppress--;
-  free(buf);
+  FLOW_FREE(buf);
   return 0;
 }
 
@@ -4329,7 +4344,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         flow_rect fp = flow__node_footprint(f, cand, lod);
         if (flow_rect_contains(fp, scr)) { target = cand->id; break; }
       }
-      free(order);
+      FLOW_FREE(order);
       if (target != -1) {
         if (target != cur_parent) flow_set_parent(f, dragged, target);
       } else if (cur_parent != -1) {
@@ -4451,7 +4466,7 @@ int flow_term_size(int *cols, int *rows) {
 char *flow_render_diff(flow_t *f);   /* embed primitive: render the current model, diff it against the
                                         previous frame, ADVANCE the front buffer, and return a malloc'd
                                         escape string (absolute-positioned CSI/SGR) the HOST writes to its
-                                        own fd/terminal, then free()s. "" (empty, non-NULL) when nothing
+                                        own fd/terminal, then frees. "" (empty, non-NULL) when nothing
                                         changed. No stdout/termios coupling — for host-owned loops.
                                         flow_present is exactly this + fputs(stdout)+fflush. */
 void flow_present(flow_t *f);
@@ -4471,16 +4486,16 @@ int flow__frames_armed(flow_t *f) {                            /* recomputed eac
   return 0;
 }
 char *flow_render_diff(flow_t *f) {
-  flow_cell *back = (flow_cell*)calloc((size_t)f->cols * f->rows, sizeof(flow_cell));
+  flow_cell *back = (flow_cell*)FLOW_CALLOC((size_t)f->cols * f->rows, sizeof(flow_cell));
   flow_render(f, back, f->cols, f->rows);
   char *esc = flow_diff_emit(f->front, back, f->cols, f->rows);   /* malloc'd; caller frees */
   memcpy(f->front, back, (size_t)f->cols * f->rows * sizeof(flow_cell));   /* advance prev-frame */
-  free(back);
+  FLOW_FREE(back);
   return esc;
 }
 void flow_present(flow_t *f) {                                    /* the stdout-bound convenience over flow_render_diff */
   char *esc = flow_render_diff(f);
-  fputs(esc, stdout); fflush(stdout); free(esc);
+  fputs(esc, stdout); fflush(stdout); FLOW_FREE(esc);
 }
 void flow_feed(flow_t *f, const char *b, int n) {
   int i = 0;

@@ -297,7 +297,7 @@ int flow_load(flow_t *f, const char *path) {
   long sz = ftell(in);
   if (sz < 0) { fclose(in); return -1; }
   if (fseek(in, 0, SEEK_SET) != 0) { fclose(in); return -1; }
-  char *buf = (char*)malloc((size_t)sz + 1);
+  char *buf = (char*)FLOW_MALLOC((size_t)sz + 1);
   if (!buf) { fclose(in); return -1; }
   size_t got = fread(buf, 1, (size_t)sz, in);
   fclose(in);
@@ -305,7 +305,7 @@ int flow_load(flow_t *f, const char *path) {
   const char *root = buf, *end = buf + got;
 
   /* (2) validate structure BEFORE touching f — malformed => -1, graph untouched. */
-  if (!flow__json_valid(root, end)) { free(buf); return -1; }
+  if (!flow__json_valid(root, end)) { FLOW_FREE(buf); return -1; }
 
   /* (3) only now wipe the graph and rebuild. flow__graph_reset clears the undo journal
      (undo must not invert against a replaced graph) and the rebuild below runs with
@@ -379,8 +379,8 @@ int flow_load(flow_t *f, const char *path) {
         if (flow__json_find(elem, eend, "data", &dv)) {
           const char *ds; int dl;
           if (flow__json_raw(dv, &ds, &dl)) {
-            char *copy = (char*)malloc((size_t)dl + 1);
-            if (copy) { memcpy(copy, ds, (size_t)dl); copy[dl] = 0; t->load(n, copy); free(copy); }
+            char *copy = (char*)FLOW_MALLOC((size_t)dl + 1);
+            if (copy) { memcpy(copy, ds, (size_t)dl); copy[dl] = 0; t->load(n, copy); FLOW_FREE(copy); }
           }
         }
       }
@@ -414,7 +414,7 @@ int flow_load(flow_t *f, const char *path) {
         char lbl[1024];
         if (flow__json_strv(lf, lbl, (int)sizeof lbl)) {
           size_t ln = strlen(lbl) + 1;
-          e->label = (char*)malloc(ln);
+          e->label = (char*)FLOW_MALLOC(ln);
           if (e->label) memcpy(e->label, lbl, ln);
         }
       }
@@ -427,7 +427,7 @@ int flow_load(flow_t *f, const char *path) {
 
   f->validator_fn = saved_vfn; f->validator_user = saved_vuser;
   f->journal.suppress--;
-  free(buf);
+  FLOW_FREE(buf);
   return 0;
 }
 

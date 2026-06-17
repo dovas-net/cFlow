@@ -50,3 +50,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+/* Allocator + assert hooks (stb convention). To route flow's heap through your own
+   arena/tracker, #define ALL FOUR of FLOW_MALLOC/CALLOC/REALLOC/FREE before including
+   flow.h (override the set together — they must pair). Buffers flow returns to you
+   (e.g. flow_render_diff / flow_save strings) are then yours to release with the SAME
+   allocator. FLOW_ASSERT defaults to assert(); #define it (even to a no-op) to override. */
+#ifndef FLOW_MALLOC
+#define FLOW_MALLOC(sz)      malloc(sz)
+#define FLOW_CALLOC(n, sz)   calloc(n, sz)
+#define FLOW_REALLOC(p, sz)  realloc(p, sz)
+#define FLOW_FREE(p)         free(p)
+#endif
+#ifndef FLOW_ASSERT
+#include <assert.h>
+#define FLOW_ASSERT(x)       assert(x)
+#endif

@@ -48,7 +48,7 @@ static void flow__remove_node_slot(flow_t *f, int id) {
 static void flow__remove_edge_slot(flow_t *f, int id) {
   for (int i = 0; i < f->nedges; i++) {
     if (f->edges[i].id != id) continue;
-    free(f->edges[i].label);
+    FLOW_FREE(f->edges[i].label);
     memmove(&f->edges[i], &f->edges[i + 1], (size_t)(f->nedges - i - 1) * sizeof(flow_edge));
     f->nedges--;
     return;
@@ -85,7 +85,7 @@ static void flow__apply_op(flow_t *f, flow__op *op, int redo) {
       else {
         flow_edge *e = flow_get_edge(f, op->u.edge.snap.id);
         if (e) {                                      /* refresh snap (label re-dup'd) for the next redo */
-          free(op->u.edge.snap.label_copy);
+          FLOW_FREE(op->u.edge.snap.label_copy);
           op->u.edge.snap.edge = *e;
           op->u.edge.snap.label_copy = flow__dup(e->label);
           op->u.edge.snap.edge.label = op->u.edge.snap.label_copy;

@@ -144,7 +144,7 @@ int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
       if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
       if ((dx > dy ? dx : dy) <= tol) { hit = 1; break; }     /* Chebyshev distance */
     }
-    free(rt.cells);
+    FLOW_FREE(rt.cells);
     if (hit) return e->id;
   }
   return -1;
@@ -261,7 +261,7 @@ static void flow__edge_toolbar(flow_t *f, flow_cellbuf *cb) {
   flow_route rt = {0};
   et->route(ss, sp, ts, tp, &rt);
   flow_pt anchor = rt.label_anchor;
-  free(rt.cells);                                   /* anchor copied out; every later return is leak-free */
+  FLOW_FREE(rt.cells);                                   /* anchor copied out; every later return is leak-free */
   int total = 0;
   for (int k = 0; k < f->edge_toolbar.n; k++) { total += flow__label_cells(f->edge_toolbar.actions[k].label); if (k) total += 1; }
   if (total <= 0) return;
@@ -330,7 +330,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       while (*u) { uint32_t cp; int n = flow_utf8_decode(u, &cp); u += n;
         flow_cellbuf_put(&cb, gx++, rt.label_anchor.y, cp, f->theme.edge_fg, f->theme.bg, attr); }
     }
-    free(rt.cells);
+    FLOW_FREE(rt.cells);
   }
 
   /* nodes on top — visited in depth-aware order (parent-before-child DOMINATES;
@@ -364,7 +364,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       flow_render_ctx ctx = { f->view.zoom, n->flags, lod };
       nt->render(n, &surf, ctx);
     }
-    free(order);
+    FLOW_FREE(order);
   }
 
   /* handle markers: only on hovered/selected nodes (xyflow reveals on hover), plus
@@ -427,7 +427,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
       for (int c = 0; c < last; c++)
         if (((rt.cells[c].x + rt.cells[c].y) & 1) == 0)        /* dashed: every other cell */
           flow_cellbuf_put(&cb, rt.cells[c].x, rt.cells[c].y, rt.cells[c].ch, f->theme.edge_fg, f->theme.bg, 0);
-      free(rt.cells);
+      FLOW_FREE(rt.cells);
     }
   }
 

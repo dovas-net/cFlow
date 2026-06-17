@@ -10,12 +10,12 @@ const flow_edge_type flow_default_edge_type  = { "default",  flow_route_orthogon
 const flow_edge_type flow_straight_edge_type = { "straight", flow_route_straight };
 
 void flow_route_push(flow_route *r, int x, int y, uint32_t ch) {
-  if (r->count >= r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->cells = (flow_route_cell*)realloc(r->cells, r->cap * sizeof *r->cells); }
+  if (r->count >= r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->cells = (flow_route_cell*)FLOW_REALLOC(r->cells, r->cap * sizeof *r->cells); }
   r->cells[r->count].x = x; r->cells[r->count].y = y; r->cells[r->count].ch = ch; r->count++;
 }
 static void flow__addpt(flow_pt **a, int *n, int *cap, int x, int y) {
   if (*n > 0 && (*a)[*n-1].x == x && (*a)[*n-1].y == y) return;
-  if (*n >= *cap) { *cap = *cap ? *cap * 2 : 32; *a = (flow_pt*)realloc(*a, *cap * sizeof(flow_pt)); }
+  if (*n >= *cap) { *cap = *cap ? *cap * 2 : 32; *a = (flow_pt*)FLOW_REALLOC(*a, *cap * sizeof(flow_pt)); }
   (*a)[*n].x = x; (*a)[*n].y = y; (*n)++;
 }
 /* direction bit from delta (neighbor relative to cell): N=1 S=2 E=4 W=8 */
@@ -61,7 +61,7 @@ void flow_route_orthogonal(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_
     out->cells[out->count - 1].ch = arrow;
     out->label_anchor = p[n/2];
   }
-  free(p);
+  FLOW_FREE(p);
 }
 /* STRAIGHT: direct integer-DDA line s->t, stepping the dominant axis by one cell
    per step (diagonal steps allowed). Glyphs: ─ horizontal, │ vertical, ╲/╱ diagonal.

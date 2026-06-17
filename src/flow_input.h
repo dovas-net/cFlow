@@ -519,7 +519,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         flow_rect fp = flow__node_footprint(f, cand, lod);
         if (flow_rect_contains(fp, scr)) { target = cand->id; break; }
       }
-      free(order);
+      FLOW_FREE(order);
       if (target != -1) {
         if (target != cur_parent) flow_set_parent(f, dragged, target);
       } else if (cur_parent != -1) {

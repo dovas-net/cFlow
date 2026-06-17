@@ -113,11 +113,11 @@ int flow_surface_w(const flow_surface *s) { return s->w; }
 int flow_surface_h(const flow_surface *s) { return s->h; }
 
 static void flow__sb(char **out, size_t *cap, size_t *len, const char *s, int n) {
-  if (*len + (size_t)n + 1 > *cap) { while (*len + (size_t)n + 1 > *cap) *cap *= 2; *out = (char*)realloc(*out, *cap); }
+  if (*len + (size_t)n + 1 > *cap) { while (*len + (size_t)n + 1 > *cap) *cap *= 2; *out = (char*)FLOW_REALLOC(*out, *cap); }
   memcpy(*out + *len, s, n); *len += n; (*out)[*len] = 0;
 }
 char *flow_diff_emit(const flow_cell *front, const flow_cell *back, int cols, int rows) {
-  size_t cap = 64, len = 0; char *out = (char*)malloc(cap); out[0] = 0;
+  size_t cap = 64, len = 0; char *out = (char*)FLOW_MALLOC(cap); out[0] = 0;
   int cury = -1, curx = -1, have_style = 0; uint8_t lfg = 0, lbg = 0, lattr = 0;
   char tmp[64], u[5];
   for (int y = 0; y < rows; y++) for (int x = 0; x < cols; x++) {
