@@ -517,7 +517,6 @@ void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-p
 void     flow_tick(flow_t *f);                /* advance clock: ++f->tick. No IO, no render, no time(). The testable seam. */
 unsigned flow_ticks(flow_t *f);               /* read current tick (consumers derive dash phase = tick % period). */
 void     flow_set_tick_ms(flow_t *f, int ms); /* redraw interval (ms) when frames are armed; default 100; <=0 clamps to 1 (never 0 → never busy-spin). */
-int      flow__frames_armed(flow_t *f);       /* present-decision predicate; v1 returns 0 (nothing armed). #5 ORs "any FLOW_ANIMATED edge"; #8 ORs "object drag in flight". */
 
 /* ---- undo/redo: capped inverse-op command journal (spec §11) ----
    Every recorded mutator (add/remove node+edge, move, reconnect, set-label, reparent)
@@ -543,12 +542,6 @@ void flow_set_undo_limit(flow_t *f, int max_commands); /* cap history depth (def
                                      oldest frees its label copies (drops, never frees, node->data ptrs).
                                      0 = disable journaling entirely; negative clamps to 0. */
 
-/* internal recording/txn primitives, DECLARED here, DEFINED in flow_model.h's impl block.
-   Pure data push — they never call mutators, so flow_model.h code may invoke them even
-   though flow_undo/flow_redo (which DO call mutators) are defined later, in flow_undo.h. */
-void flow__undo_begin(flow_t *f); /* open a coalescing transaction (nestable via depth counter) */
-void flow__undo_end(flow_t *f);   /* close the innermost transaction */
-
 typedef enum {
   FLOW_CMD_ADD_NODE, FLOW_CMD_REMOVE_NODE,   /* REMOVE_NODE snapshots the whole subtree */
   FLOW_CMD_ADD_EDGE, FLOW_CMD_REMOVE_EDGE,
@@ -556,33 +549,6 @@ typedef enum {
   FLOW_CMD_REPARENT,                         /* groups: invert flow_set_parent/group/ungroup */
   FLOW_CMD_RESIZE_NODE                       /* inc-8 #2: invert flow_set_node_size (w/h pair) */
 } flow_cmd_kind;
-
-typedef struct { int id, index; flow_node node; } flow__node_snap;   /* node.data borrowed */
-typedef struct { int id, index; flow_edge edge; char *label_copy; } flow__edge_snap; /* edge.label points at label_copy */
-
-/* one leaf mutation record (tagged union). nid0/eid0 = f->nextid/f->nexteid for the
-   undo direction, nid1/eid1 for the redo direction (only ADD ops actually differ). */
-typedef struct flow__op {
-  flow_cmd_kind kind;
-  int nid0, eid0, nid1, eid1;
-  union {
-    struct { flow__node_snap snap; } node;                            /* ADD_NODE (snap refreshed at undo) */
-    struct { int root; flow__node_snap *nodes; int nn;
-             flow__edge_snap *edges; int ne; } subtree;               /* REMOVE_NODE */
-    struct { flow__edge_snap snap; } edge;                            /* ADD_EDGE / REMOVE_EDGE */
-    struct { int id; flow_pt from, to; } move;                        /* MOVE_NODE (ABSOLUTE coords) */
-    struct { int id, fw, fh, tw, th, from_explicit; } resize;         /* RESIZE_NODE (from/to w,h + prior FLOW_EXPLICIT_SIZE bit, so undo restores a previously-auto node's absence of the flag) */
-    struct { int id, which, from_node, to_node;
-             char from_handle[16], to_handle[16]; } reconnect;        /* RECONNECT_EDGE */
-    struct { int id; char *from, *to; } label;                        /* SET_LABEL (owned dups, may be NULL) */
-    struct { int child, from_parent, to_parent;
-             flow_pt from_pos, to_pos; } reparent;                    /* REPARENT (stored-rel positions) */
-  } u;
-} flow__op;
-/* COMPOSITE representation: one command = the ordered op span of one undo step. Undo
-   applies inverses in REVERSE op order; redo re-applies forward. A transaction appends
-   all its ops into a single open command, so the whole gesture is one step. */
-struct flow__cmd { flow__op *ops; int nops, opcap; };
 
 /* callbacks — the library/app seam (panel content stays app-side, like xyflow <Panel>) */
 typedef struct {
@@ -676,6 +642,42 @@ void flow_set_resizer(flow_t *f, int enabled);
 void flow_set_helper_lines(flow_t *f, int on);
 
 #ifdef FLOW_IMPLEMENTATION
+/* ===== internal declarations (kept OUT of the public header surface — H5) =====
+   The recording/txn primitives and the undo command representation. Declared at the top
+   of the impl block so struct flow's clip/journal fields below — and flow_undo.h, which is
+   amalgamated immediately after flow_model — both see complete types. flow_cmd_kind stays
+   public (flow_top_op returns it); these do not. */
+int  flow__frames_armed(flow_t *f);  /* present-decision predicate; v1 returns 0 (nothing armed). #5 ORs "any FLOW_ANIMATED edge"; #8 ORs "object drag in flight". */
+void flow__undo_begin(flow_t *f);    /* open a coalescing transaction (nestable via depth counter) */
+void flow__undo_end(flow_t *f);      /* close the innermost transaction */
+
+typedef struct { int id, index; flow_node node; } flow__node_snap;   /* node.data borrowed */
+typedef struct { int id, index; flow_edge edge; char *label_copy; } flow__edge_snap; /* edge.label points at label_copy */
+
+/* one leaf mutation record (tagged union). nid0/eid0 = f->nextid/f->nexteid for the
+   undo direction, nid1/eid1 for the redo direction (only ADD ops actually differ). */
+typedef struct flow__op {
+  flow_cmd_kind kind;
+  int nid0, eid0, nid1, eid1;
+  union {
+    struct { flow__node_snap snap; } node;                            /* ADD_NODE (snap refreshed at undo) */
+    struct { int root; flow__node_snap *nodes; int nn;
+             flow__edge_snap *edges; int ne; } subtree;               /* REMOVE_NODE */
+    struct { flow__edge_snap snap; } edge;                            /* ADD_EDGE / REMOVE_EDGE */
+    struct { int id; flow_pt from, to; } move;                        /* MOVE_NODE (ABSOLUTE coords) */
+    struct { int id, fw, fh, tw, th, from_explicit; } resize;         /* RESIZE_NODE (from/to w,h + prior FLOW_EXPLICIT_SIZE bit, so undo restores a previously-auto node's absence of the flag) */
+    struct { int id, which, from_node, to_node;
+             char from_handle[16], to_handle[16]; } reconnect;        /* RECONNECT_EDGE */
+    struct { int id; char *from, *to; } label;                        /* SET_LABEL (owned dups, may be NULL) */
+    struct { int child, from_parent, to_parent;
+             flow_pt from_pos, to_pos; } reparent;                    /* REPARENT (stored-rel positions) */
+  } u;
+} flow__op;
+/* COMPOSITE representation: one command = the ordered op span of one undo step. Undo
+   applies inverses in REVERSE op order; redo re-applies forward. A transaction appends
+   all its ops into a single open command, so the whole gesture is one step. */
+struct flow__cmd { flow__op *ops; int nops, opcap; };
+
 /* inc-7 #3: the interactive-widget hit-test seam. A render-filled cache of screen rects
    (no heap) the left-press classifier scans ABOVE canvas classification; each entry's
    `owner` selects the provider and `action` keys the handler. Controls is the first
@@ -2781,12 +2783,22 @@ const flow_edge_type flow_default_edge_type  = { "default",  flow_route_orthogon
 const flow_edge_type flow_straight_edge_type = { "straight", flow_route_straight };
 
 void flow_route_push(flow_route *r, int x, int y, uint32_t ch) {
-  if (r->count >= r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->cells = (flow_route_cell*)FLOW_REALLOC(r->cells, r->cap * sizeof *r->cells); }
+  if (r->count >= r->cap) {                              /* no-leak realloc: drop the cell on OOM (route truncates) rather than NULL-deref/leak the old buffer */
+    int cap = r->cap ? r->cap * 2 : 16;
+    flow_route_cell *p = (flow_route_cell*)FLOW_REALLOC(r->cells, (size_t)cap * sizeof *r->cells);
+    if (!p) return;                                      /* OOM: keep old buffer; this cell is dropped */
+    r->cells = p; r->cap = cap;
+  }
   r->cells[r->count].x = x; r->cells[r->count].y = y; r->cells[r->count].ch = ch; r->count++;
 }
 static void flow__addpt(flow_pt **a, int *n, int *cap, int x, int y) {
   if (*n > 0 && (*a)[*n-1].x == x && (*a)[*n-1].y == y) return;
-  if (*n >= *cap) { *cap = *cap ? *cap * 2 : 32; *a = (flow_pt*)FLOW_REALLOC(*a, *cap * sizeof(flow_pt)); }
+  if (*n >= *cap) {                                      /* no-leak realloc: drop the point on OOM rather than NULL-deref/leak */
+    int c = *cap ? *cap * 2 : 32;
+    flow_pt *p = (flow_pt*)FLOW_REALLOC(*a, (size_t)c * sizeof(flow_pt));
+    if (!p) return;                                      /* OOM: keep old buffer; this point is dropped */
+    *a = p; *cap = c;
+  }
   (*a)[*n].x = x; (*a)[*n].y = y; (*n)++;
 }
 /* direction bit from delta (neighbor relative to cell): N=1 S=2 E=4 W=8 */
@@ -2824,7 +2836,7 @@ void flow_route_orthogonal(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_
     if (i < n - 1) m |= flow__dir(p[i+1].x - p[i].x, p[i+1].y - p[i].y);
     flow_route_push(out, p[i].x, p[i].y, flow__glyph(m));
   }
-  if (n > 0) {                      /* arrowhead at the target end, pointing along the approach */
+  if (out->count > 0) {             /* arrowhead at the target end, pointing along the approach (count>0 ⟹ n>0, so p[] is valid; guards against OOM-dropped pushes leaving count==0) */
     int ax, ay;
     if (n >= 2) { ax = p[n-1].x - p[n-2].x; ay = p[n-1].y - p[n-2].y; }
     else        { ax = t.x - s.x;           ay = t.y - s.y; }
@@ -2861,7 +2873,7 @@ void flow_route_straight(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_ro
       else if (ddx == 0) ch = 0x2502;                 /* │ vertical   */
       else if ((ddx > 0) == (ddy > 0)) ch = 0x2572;   /* ╲ down-right / up-left */
       else               ch = 0x2571;                 /* ╱ down-left / up-right */
-      out->cells[out->count - 1].ch = ch;             /* glyph of a cell = the step LEAVING it */
+      if (out->count > 0) out->cells[out->count - 1].ch = ch;  /* glyph of a cell = the step LEAVING it (guard: i=0 push may have been OOM-dropped) */
     }
     flow_route_push(out, x, y, ch);
     px = x; py = y;

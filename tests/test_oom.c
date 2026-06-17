@@ -68,5 +68,34 @@ int main(void) {
     flow_free(g);
   }
 
+  /* (5) edge routing under OOM (v0.3 #2): flow_route_orthogonal/straight grow their
+     cell + path-point arrays via FLOW_REALLOC mid-route. A failing realloc must DROP the
+     cell/point and keep the old buffer (no realloc-into-self: the bug overwrote the live
+     pointer with NULL, leaking it and NULL-deref'ing the next write), and the target-end
+     arrowhead fix-ups must never touch cells[-1] when every push was OOM-dropped. Drive a
+     long (~Manhattan-60) path and fail at EVERY allocation boundary; the structural
+     invariant (count<=cap, cells!=NULL unless empty) is what realloc-into-self violated,
+     and ASan/UBSan in the gate proves no OOB write / no leak on each truncated route. */
+  {
+    flow_pt s = { 0, 0 }, t = { 40, 20 };            /* long path: both the cell and point arrays grow several times */
+    int ok = 1;
+    for (int fail_at = 0; fail_at <= 12; fail_at++) { /* > the handful of reallocs either router makes, so every boundary + the all-succeed case is covered */
+      flow_route ro = { 0 };
+      g_alloc_n = 0; g_fail_at = fail_at;
+      flow_route_orthogonal(s, FLOW_RIGHT, t, FLOW_LEFT, &ro);
+      g_fail_at = -1;
+      if (ro.count > ro.cap || (ro.cells == NULL && ro.count != 0)) ok = 0;
+      free(ro.cells);
+
+      flow_route rs = { 0 };
+      g_alloc_n = 0; g_fail_at = fail_at;
+      flow_route_straight(s, FLOW_RIGHT, t, FLOW_LEFT, &rs);
+      g_fail_at = -1;
+      if (rs.count > rs.cap || (rs.cells == NULL && rs.count != 0)) ok = 0;
+      free(rs.cells);
+    }
+    ASSERT(ok, "route_orthogonal/straight survive OOM at every alloc step (count<=cap, cells consistent, no cells[-1])");
+  }
+
   return flowtest_report("test_oom");
 }

@@ -10,12 +10,22 @@ const flow_edge_type flow_default_edge_type  = { "default",  flow_route_orthogon
 const flow_edge_type flow_straight_edge_type = { "straight", flow_route_straight };
 
 void flow_route_push(flow_route *r, int x, int y, uint32_t ch) {
-  if (r->count >= r->cap) { r->cap = r->cap ? r->cap * 2 : 16; r->cells = (flow_route_cell*)FLOW_REALLOC(r->cells, r->cap * sizeof *r->cells); }
+  if (r->count >= r->cap) {                              /* no-leak realloc: drop the cell on OOM (route truncates) rather than NULL-deref/leak the old buffer */
+    int cap = r->cap ? r->cap * 2 : 16;
+    flow_route_cell *p = (flow_route_cell*)FLOW_REALLOC(r->cells, (size_t)cap * sizeof *r->cells);
+    if (!p) return;                                      /* OOM: keep old buffer; this cell is dropped */
+    r->cells = p; r->cap = cap;
+  }
   r->cells[r->count].x = x; r->cells[r->count].y = y; r->cells[r->count].ch = ch; r->count++;
 }
 static void flow__addpt(flow_pt **a, int *n, int *cap, int x, int y) {
   if (*n > 0 && (*a)[*n-1].x == x && (*a)[*n-1].y == y) return;
-  if (*n >= *cap) { *cap = *cap ? *cap * 2 : 32; *a = (flow_pt*)FLOW_REALLOC(*a, *cap * sizeof(flow_pt)); }
+  if (*n >= *cap) {                                      /* no-leak realloc: drop the point on OOM rather than NULL-deref/leak */
+    int c = *cap ? *cap * 2 : 32;
+    flow_pt *p = (flow_pt*)FLOW_REALLOC(*a, (size_t)c * sizeof(flow_pt));
+    if (!p) return;                                      /* OOM: keep old buffer; this point is dropped */
+    *a = p; *cap = c;
+  }
   (*a)[*n].x = x; (*a)[*n].y = y; (*n)++;
 }
 /* direction bit from delta (neighbor relative to cell): N=1 S=2 E=4 W=8 */
@@ -53,7 +63,7 @@ void flow_route_orthogonal(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_
     if (i < n - 1) m |= flow__dir(p[i+1].x - p[i].x, p[i+1].y - p[i].y);
     flow_route_push(out, p[i].x, p[i].y, flow__glyph(m));
   }
-  if (n > 0) {                      /* arrowhead at the target end, pointing along the approach */
+  if (out->count > 0) {             /* arrowhead at the target end, pointing along the approach (count>0 ⟹ n>0, so p[] is valid; guards against OOM-dropped pushes leaving count==0) */
     int ax, ay;
     if (n >= 2) { ax = p[n-1].x - p[n-2].x; ay = p[n-1].y - p[n-2].y; }
     else        { ax = t.x - s.x;           ay = t.y - s.y; }
@@ -90,7 +100,7 @@ void flow_route_straight(flow_pt s, flow_pos sp, flow_pt t, flow_pos tp, flow_ro
       else if (ddx == 0) ch = 0x2502;                 /* │ vertical   */
       else if ((ddx > 0) == (ddy > 0)) ch = 0x2572;   /* ╲ down-right / up-left */
       else               ch = 0x2571;                 /* ╱ down-left / up-right */
-      out->cells[out->count - 1].ch = ch;             /* glyph of a cell = the step LEAVING it */
+      if (out->count > 0) out->cells[out->count - 1].ch = ch;  /* glyph of a cell = the step LEAVING it (guard: i=0 push may have been OOM-dropped) */
     }
     flow_route_push(out, x, y, ch);
     px = x; py = y;
