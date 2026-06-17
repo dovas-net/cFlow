@@ -1,0 +1,88 @@
+name: CI
+
+# flow.h is a GENERATED single-header, amalgamated from src/ by tools/amalgamate.sh
+# and also committed. The crown-jewel gate here is `check-amalgamation`: a PR that
+# edits src/ but forgets to regenerate would otherwise ship a stale header to every
+# consumer. Mark check-amalgamation a REQUIRED check in branch protection.
+#
+# Strictness: build-test gates -Werror on top of -Wall -Wextra. The tree is kept
+# -Werror-clean under both gcc and clang (the few dense `if (a) x; if (b) y;` lines were
+# split onto separate lines; node-type test literals use designated initializers).
+# CAVEAT: -Werror is compiler-version-fragile — a future runner's gcc may surface a NEW
+# diagnostic and red the build. Fix it in src/ (or narrow with a targeted -Wno-...) rather
+# than dropping the gate. clang-tidy runs ADVISORY, honoring .clang-tidy (WarningsAsErrors:'').
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build+test (${{ matrix.os }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, cc: gcc }
+          - { os: ubuntu-latest, cc: clang }
+          - { os: macos-latest,  cc: clang }   # Apple clang; macOS `gcc` is a clang shim
+    steps:
+      - uses: actions/checkout@v4
+      - name: build lib + demos + examples (-Werror)
+        run: make CC=${{ matrix.cc }} CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror" all
+      - name: run all test suites (-Werror)
+        run: make CC=${{ matrix.cc }} CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror" test
+
+  check-amalgamation:
+    name: amalgamation drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: regenerate flow.h from src/ and assert it matches the committed header
+        run: |
+          sh tools/amalgamate.sh
+          git diff --exit-code flow.h
+
+  sanitizers:
+    name: sanitizers (asan+ubsan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build + run every suite under ASan/UBSan
+        # Run from the repo root: snapshot goldens are resolved cwd-relative (flowtest.h).
+        # Fail-accumulating: report every failing suite, not just the first.
+        run: |
+          fail=0
+          for t in tests/test_*.c; do
+            clang -std=c11 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all -g "$t" -o /tmp/sanx -lm \
+              && /tmp/sanx || { echo "SANITIZER FAIL: $t"; fail=1; }
+          done
+          exit $fail
+
+  cpp:
+    name: C++ consumption (extern "C")
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make cpp   # flow.h compiles+runs as a C++ TU, and C flow.o links against a C++ caller
+        run: make cpp
+
+  lint:
+    name: clang-tidy (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # advisory only — honors the committed .clang-tidy (non-gating)
+    steps:
+      - uses: actions/checkout@v4
+      - name: install clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy
+      - name: clang-tidy (analyze a TU that includes the whole library)
+        run: clang-tidy tests/test_smoke.c -- -std=c11

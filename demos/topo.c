@@ -148,7 +148,8 @@ static void on_overlay(flow_t *f, flow_surface *s, void *u) {
   const device *d = (const device*)n->data;
   int w = 42, h = 8;
   int ox = flow_surface_w(s) - w - 1, oy = flow_surface_h(s) - h - 1;
-  if (ox < 0) ox = 0; if (oy < 0) oy = 0;
+  if (ox < 0) ox = 0;
+  if (oy < 0) oy = 0;
   flow_box(s, ox, oy, w, h, FLOW_FG, FLOW_BG, FLOW_BOLD);
   char line[64];
   flow_text(s, ox + 2, oy + 1, d->label, FLOW_FG, FLOW_BG, FLOW_BOLD);

@@ -1524,7 +1524,7 @@ void flow_remove_node(flow_t *f, int id) {
   if (top) {
     sig = flow__sel_sig(f);
     if (f->cb.on_nodes_delete) {
-      int *ids = f->nnodes ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+      int *ids = f->nnodes > 0 ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
       for (int i = 0; i < f->nnodes; i++)
         if (flow_is_ancestor(f, id, f->nodes[i].id)) ids[n++] = f->nodes[i].id; /* id and its descendants */
       if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
@@ -1572,7 +1572,7 @@ void flow_delete_selection(flow_t *f) {
   for (int i = 0; i < f->nnodes; i++)
     if (f->nodes[i].flags & FLOW_NODELETE) f->nodes[i].flags &= ~(unsigned)FLOW_SELECTED;
   if (f->cb.on_nodes_delete) {
-    int *ids = f->nnodes ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+    int *ids = f->nnodes > 0 ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
     for (int i = 0; i < f->nnodes; i++)
       if (flow__sel_or_ancestor(f, f->nodes[i].id)) ids[n++] = f->nodes[i].id;
     if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
@@ -1927,8 +1927,10 @@ static flow_pt flow__handle_screen(flow_t *f, const flow_node *n, const flow_han
   flow_pt   wa = flow_handle_anchor(f, n, h);              /* world anchor (handles NULL h + 'along') */
   int ox = wa.x - wr.x, oy = wa.y - wr.y;                  /* in-body offset in CONSTANT cells */
   flow_rect fp = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom)); /* screen rect: full OR collapsed */
-  if (ox > fp.w - 1) ox = fp.w - 1; if (ox < 0) ox = 0;    /* clamp into footprint */
-  if (oy > fp.h - 1) oy = fp.h - 1; if (oy < 0) oy = 0;
+  if (ox > fp.w - 1) ox = fp.w - 1;    /* clamp into footprint */
+  if (ox < 0) ox = 0;
+  if (oy > fp.h - 1) oy = fp.h - 1;
+  if (oy < 0) oy = 0;
   flow_pt s = { fp.x + ox, fp.y + oy }; return s;
 }
 static int flow__node_handles_visible(flow_t *f, const flow_node *n) {
@@ -2994,12 +2996,15 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
      would treat it as a point at the world origin and mis-scale the viewport rect */
   flow_rect b = flow_bounds(f);
   flow_rect W = (b.w > 0 || b.h > 0) ? flow_rect_union(b, vp) : vp;
-  if (W.w < 1) W.w = 1; if (W.h < 1) W.h = 1;
+  if (W.w < 1) W.w = 1;
+  if (W.h < 1) W.h = 1;
   /* viewport rectangle first, node dots on top */
   int vx  = (vp.x - W.x) * iw / W.w,             vy  = (vp.y - W.y) * ih / W.h;
   int vx2 = (vp.x + vp.w - 1 - W.x) * iw / W.w,  vy2 = (vp.y + vp.h - 1 - W.y) * ih / W.h;
-  if (vx < 0) vx = 0; if (vy < 0) vy = 0;
-  if (vx2 > iw - 1) vx2 = iw - 1; if (vy2 > ih - 1) vy2 = ih - 1;
+  if (vx < 0) vx = 0;
+  if (vy < 0) vy = 0;
+  if (vx2 > iw - 1) vx2 = iw - 1;
+  if (vy2 > ih - 1) vy2 = ih - 1;
   for (int x = vx; x <= vx2; x++) { flow_put(&s, 1+x, 1+vy, 0x2500, f->theme.fg, f->theme.bg, 0); flow_put(&s, 1+x, 1+vy2, 0x2500, f->theme.fg, f->theme.bg, 0); }
   for (int y = vy; y <= vy2; y++) { flow_put(&s, 1+vx, 1+y, 0x2502, f->theme.fg, f->theme.bg, 0); flow_put(&s, 1+vx2, 1+y, 0x2502, f->theme.fg, f->theme.bg, 0); }
   for (int i = 0; i < f->nnodes; i++) {
@@ -3008,8 +3013,10 @@ static void flow__minimap(flow_t *f, flow_cellbuf *cb) {
     flow_pt a = flow_node_abs(f, n);
     int cx = a.x + n->w / 2, cy = a.y + n->h / 2;
     int mx = (cx - W.x) * iw / W.w, my = (cy - W.y) * ih / W.h;
-    if (mx < 0) mx = 0; if (mx > iw - 1) mx = iw - 1;
-    if (my < 0) my = 0; if (my > ih - 1) my = ih - 1;
+    if (mx < 0) mx = 0;
+    if (mx > iw - 1) mx = iw - 1;
+    if (my < 0) my = 0;
+    if (my > ih - 1) my = ih - 1;
     int sel = n->flags & FLOW_SELECTED;
     flow_put(&s, 1+mx, 1+my, sel ? 0x25C9 : 0x2022, f->theme.fg, f->theme.bg, sel ? FLOW_BOLD : 0);  /* ◉ / • */
   }
@@ -3078,7 +3085,8 @@ int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
     int hit = 0;
     for (int c = 0; c < rt.count; c++) {
       int dx = rt.cells[c].x - screen.x, dy = rt.cells[c].y - screen.y;
-      if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
+      if (dx < 0) dx = -dx;
+      if (dy < 0) dy = -dy;
       if ((dx > dy ? dx : dy) <= tol) { hit = 1; break; }     /* Chebyshev distance */
     }
     FLOW_FREE(rt.cells);
@@ -3102,7 +3110,8 @@ static flow_rect flow__node_clip(flow_t *f, const flow_node *n, int lod, int col
     int x1 = (clip.x + clip.w) < (fp.x + fp.w) ? (clip.x + clip.w) : (fp.x + fp.w);
     int y1 = (clip.y + clip.h) < (fp.y + fp.h) ? (clip.y + clip.h) : (fp.y + fp.h);
     clip.x = x0; clip.y = y0; clip.w = x1 - x0; clip.h = y1 - y0;
-    if (clip.w < 0) clip.w = 0; if (clip.h < 0) clip.h = 0;
+    if (clip.w < 0) clip.w = 0;
+    if (clip.h < 0) clip.h = 0;
     parent = pn->parent;
   }
   return clip;

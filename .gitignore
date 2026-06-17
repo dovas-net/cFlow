@@ -6,6 +6,8 @@ tests/test_*
 demos/hello_flow
 demos/topo
 demos/flowchart
+# compiled example binaries (keep the .c sources)
+examples/embed_headless
 # personal / local config (not shared)
 CLAUDE.local.md
 .claude/settings.local.json

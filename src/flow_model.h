@@ -1247,7 +1247,7 @@ void flow_remove_node(flow_t *f, int id) {
   if (top) {
     sig = flow__sel_sig(f);
     if (f->cb.on_nodes_delete) {
-      int *ids = f->nnodes ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+      int *ids = f->nnodes > 0 ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
       for (int i = 0; i < f->nnodes; i++)
         if (flow_is_ancestor(f, id, f->nodes[i].id)) ids[n++] = f->nodes[i].id; /* id and its descendants */
       if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
@@ -1295,7 +1295,7 @@ void flow_delete_selection(flow_t *f) {
   for (int i = 0; i < f->nnodes; i++)
     if (f->nodes[i].flags & FLOW_NODELETE) f->nodes[i].flags &= ~(unsigned)FLOW_SELECTED;
   if (f->cb.on_nodes_delete) {
-    int *ids = f->nnodes ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
+    int *ids = f->nnodes > 0 ? (int*)FLOW_MALLOC((size_t)f->nnodes * sizeof(int)) : NULL; int n = 0;
     for (int i = 0; i < f->nnodes; i++)
       if (flow__sel_or_ancestor(f, f->nodes[i].id)) ids[n++] = f->nodes[i].id;
     if (n) f->cb.on_nodes_delete(f, ids, n, f->cb.user);
@@ -1650,8 +1650,10 @@ static flow_pt flow__handle_screen(flow_t *f, const flow_node *n, const flow_han
   flow_pt   wa = flow_handle_anchor(f, n, h);              /* world anchor (handles NULL h + 'along') */
   int ox = wa.x - wr.x, oy = wa.y - wr.y;                  /* in-body offset in CONSTANT cells */
   flow_rect fp = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom)); /* screen rect: full OR collapsed */
-  if (ox > fp.w - 1) ox = fp.w - 1; if (ox < 0) ox = 0;    /* clamp into footprint */
-  if (oy > fp.h - 1) oy = fp.h - 1; if (oy < 0) oy = 0;
+  if (ox > fp.w - 1) ox = fp.w - 1;    /* clamp into footprint */
+  if (ox < 0) ox = 0;
+  if (oy > fp.h - 1) oy = fp.h - 1;
+  if (oy < 0) oy = 0;
   flow_pt s = { fp.x + ox, fp.y + oy }; return s;
 }
 static int flow__node_handles_visible(flow_t *f, const flow_node *n) {

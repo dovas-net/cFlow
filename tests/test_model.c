@@ -5,7 +5,9 @@
 /* a trivial node type so measure() gives deterministic sizes for hit/bounds */
 static void m_measure(const flow_node *n, int *w, int *h) { (void)n; *w = 4; *h = 3; }
 static void m_render(const flow_node *n, flow_surface *s, flow_render_ctx c) { (void)n;(void)s;(void)c; }
-static const flow_node_type M = { "box", m_measure, m_render, NULL, 0 };
+/* designated init: omits the optional save/load/label fields (zero = unused) without
+   tripping -Wmissing-field-initializers under CI's -Werror */
+static const flow_node_type M = { .type = "box", .measure = m_measure, .render = m_render };
 
 /* hidden x selection (inc-4 #11) */
 static int mh_sel_fires = 0;
