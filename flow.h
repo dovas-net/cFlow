@@ -577,6 +577,15 @@ void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n)
    BORROWED array; NULL/0 disarms. Transient chrome: never saved, never journaled. */
 void flow_set_edge_toolbar(flow_t *f, const flow_toolbar_action *actions, int n);
 
+/* Node resizer (inc-8 #3) — the interactive analog of flow_set_node_size: a single SE-corner
+   resize grip (◢) drawn on the LONE selected node (flow_selected_count(f)==1), at LOD 0, while
+   the canvas is unlocked. Grabbing it drags the node's w/h live (size-only — the NW origin stays
+   fixed), clamped to >= 1, as ONE undo step (the journaled flow_set_node_size rail). Off by
+   default (calloc-zero), like xyflow's opt-in NodeResizer; enabling it is the only way to add the
+   grip without churning the existing selected-node snapshots. Transient chrome: never saved/
+   journaled. v1 = SE corner only; origin-moving handles + min/max + aspect-ratio are deferred. */
+void flow_set_resizer(flow_t *f, int enabled);
+
 /* alignment helper lines + snap-to-guide during a single-node drag (inc-5 #8,
    xyflow helperLines). Off by default: with on==0 the drag path is byte-for-byte
    the landed behavior (no snap, no guides). When ON, a dragged edge (L/R/T/B)
@@ -629,6 +638,7 @@ struct flow {
   flow_key_hook key_hook_fn; void *key_hook_user;                     /* pre-dispatch key gate (inc-5 #10); NULL = none (calloc default) */
   int key_hook_modal;                                                 /* inc-6 #6: while set AND a hook is installed, an unconsumed seq is DROPPED in flow_dispatch_key (never falls through). Calloc 0 = off. Transient — not journaled, not saved. */
   int reconnect_edge, reconnect_which;                        /* in-flight endpoint-reconnect drag: edge id (-1 idle) + which endpoint (0=source,1=target) */
+  int resize_node, resize_corner;                             /* inc-8 #3: in-flight node resize: node id (-1 idle) + corner (0=SE for v1) */
   flow_callbacks cb;
   struct { int enabled, w, h; flow_corner corner; } minimap;
   struct { flow_bg_variant variant; int gap; } bg;
@@ -639,6 +649,7 @@ struct flow {
   int statusbar;  /* built-in bottom help/status line */
   int locked;     /* inc-7 #3: whole-canvas lock (Controls [lock]) — suppress drag/connect/reconnect/marquee/click-select; pan+zoom still work. Transient: never saved/journaled. */
   struct { int enabled; flow_corner corner; } controls;  /* inc-7 #3: Controls bar config (off by default; the minimap value-struct precedent) */
+  struct { int enabled; } resizer;  /* inc-8 #3: node-resizer toggle (off by default; xyflow's opt-in NodeResizer). SE-corner grip on the lone selected node. Transient chrome: never saved/journaled. */
   struct { const flow_toolbar_action *actions; int n; } node_toolbar;  /* inc-7 #4: borrowed action array ({NULL,0}=off) */
   struct { const flow_toolbar_action *actions; int n; } edge_toolbar;  /* inc-7 #5: borrowed action array ({NULL,0}=off) */
   struct { int x, y, w, h, owner, action; } widgets[16]; int nwidgets;  /* inc-7 #3: render-filled widget hit-rect cache (no heap) — drawn region == hittable region; refilled each frame */
@@ -845,6 +856,7 @@ flow_t *flow_new(int cols, int rows) {
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1; f->focus_node = -1;
   f->conn_target_node = -1;                                    /* inc-7 #2: no candidate (calloc 0 is a valid node id) */
   f->reconnect_edge = -1; f->last_click_node = -1; f->last_click_edge = -1;
+  f->resize_node = -1; f->resize_corner = -1;                  /* inc-8 #3: no resize in flight */
   f->autopan_margin = 3; f->autopan_speed = 2;
   f->tick_ms = 100;                                            /* inc-6 #4: 10 Hz redraw when armed; tick stays calloc-zero */
   flow_set_color_mode(f, FLOW_COLOR_DEFAULT);                  /* inc-7 #1: seed the legacy 7/0/8 preset (calloc-zero would be black-on-black) */
@@ -1347,6 +1359,7 @@ flow_color_mode flow_color_mode_get(flow_t *f) { return f->color_mode; }
 void flow_set_controls(flow_t *f, int enabled, flow_corner corner) { f->controls.enabled = enabled ? 1 : 0; f->controls.corner = corner; }
 void flow_set_locked(flow_t *f, int on) { f->locked = on ? 1 : 0; }
 int  flow_locked(flow_t *f) { return f->locked; }
+void flow_set_resizer(flow_t *f, int enabled) { f->resizer.enabled = enabled ? 1 : 0; }
 void flow_set_node_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->node_toolbar.actions = actions; f->node_toolbar.n = n; }
 void flow_set_edge_toolbar(flow_t *f, const flow_toolbar_action *actions, int n) { f->edge_toolbar.actions = actions; f->edge_toolbar.n = n; }
 int flow_selected_edge(flow_t *f) {
@@ -1840,6 +1853,25 @@ int flow_hit_handle(flow_t *f, flow_pt screen, int *out_node) {
   }
   if (out_node) *out_node = -1;
   return -1;
+}
+/* inc-8 #3: the SINGLE source for "is there a resize grip, and where". The render pass
+   (flow__node_resizer) and the press-arm (flow_input.h) both call this, so the drawn grip and
+   the hittable cell can never drift — the flow__handle_screen single-source discipline. Returns
+   the eligible node id (writing its SE-corner screen cell to *out_cell), or -1. Gated: resizer
+   enabled, NOT locked, exactly one selected node, that node visible, LOD 0 (at LOD 1 the
+   footprint collapses to a 1x1 marker, src/flow_model.h flow__node_footprint, so a corner grip
+   would alias the body). The press-arm sits AFTER the lock gate too, so lock-safety is belt-and-
+   suspenders. SE corner == (fp.x+fp.w-1, fp.y+fp.h-1) of the rendered footprint. */
+static int flow__resize_marker(flow_t *f, flow_pt *out_cell) {
+  if (!f->resizer.enabled || f->locked) return -1;
+  if (flow_selected_count(f) != 1) return -1;
+  if (flow__lod_for(f, f->view.zoom) != 0) return -1;
+  int id = flow_selected_node(f);
+  flow_node *n = flow_get_node(f, id);
+  if (!n || !flow__node_visible(f, n)) return -1;
+  flow_rect fp = flow__node_footprint(f, n, 0);   /* LOD 0 guaranteed above */
+  if (out_cell) { out_cell->x = fp.x + fp.w - 1; out_cell->y = fp.y + fp.h - 1; }
+  return id;
 }
 void flow_set_hover(flow_t *f, int node) {
   for (int i = 0; i < f->nnodes; i++) f->nodes[i].flags &= ~FLOW_HOVERED;
@@ -3090,6 +3122,20 @@ static void flow__edge_toolbar(flow_t *f, flow_cellbuf *cb) {
     cx += w + 1;
   }
 }
+/* inc-8 #3: the node resizer — a single SE-corner resize grip (◢) on the lone selected node.
+   All gating lives in flow__resize_marker (resizer enabled, unlocked, single selection, LOD 0),
+   which the press-arm shares so the drawn grip == the hittable cell. RENDER-ONLY: the grip is
+   NOT pushed into widgets[] — that cache feeds the click-fire-and-consume widget loop, which
+   runs ABOVE the lock gate and would eat the resize press before a drag could begin. Wired
+   BEFORE the interactive widgets (controls/toolbars) so any widget sharing the corner cell
+   paints on top — matching the press precedence (the widget loop wins over the resize press-
+   arm). Gates on SELECTED (not hover), so render_handles_hover stays byte-identical; off by
+   default keeps every existing selected-node golden identical. Chrome color tracks color_mode. */
+static void flow__node_resizer(flow_t *f, flow_cellbuf *cb) {
+  flow_pt mc;
+  if (flow__resize_marker(f, &mc) == -1) return;
+  flow_cellbuf_put(cb, mc.x, mc.y, 0x25E2, f->theme.widget_fg, f->theme.widget_bg, 0);  /* ◢ SE grip */
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, f->theme.fg, f->theme.bg);
@@ -3261,6 +3307,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
   f->nwidgets = 0;                                   /* inc-7 #3: refill the widget hit-rect cache each frame (controls + #4/#5 toolbars append below) */
+  flow__node_resizer(f, &cb);                        /* inc-8 #3: render-only SE grip; BEFORE the widgets so a coincident widget cell paints on top (matches press precedence: widget loop > resize arm) */
   if (f->controls.enabled) flow__controls(f, &cb);
   flow__node_toolbar(f, &cb);                        /* inc-7 #4: gated internally on actions + single selection */
   flow__edge_toolbar(f, &cb);                        /* inc-7 #5: gated on actions + a selected edge (exclusive with node toolbar) */
@@ -3906,6 +3953,24 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         return;                                  /* first motion arms the existing dragging_pan path */
       }
       f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+      /* inc-8 #3: resize-handle press — if scr is the SE resize grip cell of the lone selected
+         node (resizer enabled, unlocked, LOD 0), arm a SIZE-only resize drag. The grip is
+         render-only (NOT in widgets[]), so this is a DIRECT geometric hit-test via the SAME
+         flow__resize_marker the render pass uses (drawn == hittable). Mirrors the reconnect arm
+         (:216): keep mouse_down, open the undo bracket, return WITHOUT the widget click-consume
+         reset. BEFORE flow_hit_handle so a coincident source-handle cell resizes (resize-before-
+         handle: the grip is engine chrome on the selected node). AFTER the lock gate (:165) so a
+         resize can never start while locked. */
+      {
+        flow_pt rmc; int rnode = flow__resize_marker(f, &rmc);
+        if (rnode != -1 && scr.x == rmc.x && scr.y == rmc.y) {
+          f->resize_node = rnode; f->resize_corner = 0;          /* SE */
+          f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+          f->down_modsel = 0; f->marquee_active = 0;
+          flow__undo_begin(f);                 /* resize gesture = ONE undo step (closed on release) */
+          return;
+        }
+      }
       /* HIT PRECEDENCE (trio invariant): handle -> node-body -> pane. A later edge
          package inserts an edge-endpoint test BETWEEN handle and node-body here.
          Handles only hit on hovered/selected/connecting nodes (flow_hit_handle). */
@@ -3973,6 +4038,26 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->last_cursor = scr;                       /* inc-6 #8 */
       flow__autopan(f, scr);                      /* nothing to re-place: release hit-tests at the cursor */
       return;
+    }
+    if (f->resize_node != -1) {                   /* inc-8 #3: SIZE-only resize drag */
+      if (flow__lod_for(f, f->view.zoom) != 0) return;  /* v1: resize only at LOD 0 — a Ctrl+wheel zoom
+        across FLOW_LOD_THRESHOLD mid-drag collapses the footprint to a 1x1 marker, so the SE-corner
+        delta would jump. FREEZE here (the press-arm gates LOD 0 too); the per-motion fp recompute makes
+        the gesture resume self-correcting when zoomed back to LOD 0. */
+      if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
+      flow_node *n = flow_get_node(f, f->resize_node);
+      if (n) {
+        flow_rect fp = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom));
+        int dw = scr.x - (fp.x + fp.w - 1);       /* footprint-delta: a screen-cell drag maps 1:1
+                                                     to w/h. NOT flow_to_world — node bodies are
+                                                     CONSTANT glyph size (only position scales with
+                                                     zoom; flow__node_footprint), so a size delta is
+                                                     zoom-independent. The per-motion fp recompute
+                                                     makes the delta self-correcting vs n->w/n->h. */
+        int dh = scr.y - (fp.y + fp.h - 1);
+        if (dw || dh) flow_set_node_size(f, f->resize_node, n->w + dw, n->h + dh);  /* clamps >=1; coalesces in the open txn */
+      }
+      return;                                     /* OUT of flow__drag_in_flight (v1): no autopan / last_cursor */
     }
     if (!f->mouse_down) return;
     if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
@@ -4134,6 +4219,12 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       flow__undo_end(f);                       /* pairs with the press-time begin (no-drag click: empty txn) */
       return;
     }
+    if (f->resize_node != -1) {                  /* inc-8 #3: finish a resize drag */
+      f->resize_node = -1; f->resize_corner = -1;
+      f->mouse_down = 0; f->moved = 0;
+      flow__undo_end(f);                       /* pairs with the press-time begin (no-drag click: empty txn = no command) */
+      return;
+    }
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
       if (f->space_held) {
         /* space-pan click with no motion: a grab without a move. Do NOT clear the
@@ -4209,6 +4300,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (f->moved) f->last_click_node = -1;       /* any drag breaks a double-click pair */
     f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
     f->down_modsel = 0; f->marquee_active = 0; f->marquee_on = 0;
+    f->resize_node = -1; f->resize_corner = -1;  /* inc-8 #3: defensive — the resize-release branch returns early, but never leave a stale arm */
     f->helper.nvert = 0; f->helper.nhorz = 0;    /* guides never outlive the gesture (inc-5 #8) */
   }
 }

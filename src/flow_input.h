@@ -186,6 +186,24 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
         return;                                  /* first motion arms the existing dragging_pan path */
       }
       f->mouse_down = 1; f->moved = 0; f->down_pos = scr;
+      /* inc-8 #3: resize-handle press — if scr is the SE resize grip cell of the lone selected
+         node (resizer enabled, unlocked, LOD 0), arm a SIZE-only resize drag. The grip is
+         render-only (NOT in widgets[]), so this is a DIRECT geometric hit-test via the SAME
+         flow__resize_marker the render pass uses (drawn == hittable). Mirrors the reconnect arm
+         (:216): keep mouse_down, open the undo bracket, return WITHOUT the widget click-consume
+         reset. BEFORE flow_hit_handle so a coincident source-handle cell resizes (resize-before-
+         handle: the grip is engine chrome on the selected node). AFTER the lock gate (:165) so a
+         resize can never start while locked. */
+      {
+        flow_pt rmc; int rnode = flow__resize_marker(f, &rmc);
+        if (rnode != -1 && scr.x == rmc.x && scr.y == rmc.y) {
+          f->resize_node = rnode; f->resize_corner = 0;          /* SE */
+          f->down_node = -1; f->drag_node = -1; f->dragging_pan = 0;
+          f->down_modsel = 0; f->marquee_active = 0;
+          flow__undo_begin(f);                 /* resize gesture = ONE undo step (closed on release) */
+          return;
+        }
+      }
       /* HIT PRECEDENCE (trio invariant): handle -> node-body -> pane. A later edge
          package inserts an edge-endpoint test BETWEEN handle and node-body here.
          Handles only hit on hovered/selected/connecting nodes (flow_hit_handle). */
@@ -253,6 +271,26 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       f->last_cursor = scr;                       /* inc-6 #8 */
       flow__autopan(f, scr);                      /* nothing to re-place: release hit-tests at the cursor */
       return;
+    }
+    if (f->resize_node != -1) {                   /* inc-8 #3: SIZE-only resize drag */
+      if (flow__lod_for(f, f->view.zoom) != 0) return;  /* v1: resize only at LOD 0 — a Ctrl+wheel zoom
+        across FLOW_LOD_THRESHOLD mid-drag collapses the footprint to a 1x1 marker, so the SE-corner
+        delta would jump. FREEZE here (the press-arm gates LOD 0 too); the per-motion fp recompute makes
+        the gesture resume self-correcting when zoomed back to LOD 0. */
+      if (scr.x != f->down_pos.x || scr.y != f->down_pos.y) f->moved = 1;
+      flow_node *n = flow_get_node(f, f->resize_node);
+      if (n) {
+        flow_rect fp = flow__node_footprint(f, n, flow__lod_for(f, f->view.zoom));
+        int dw = scr.x - (fp.x + fp.w - 1);       /* footprint-delta: a screen-cell drag maps 1:1
+                                                     to w/h. NOT flow_to_world — node bodies are
+                                                     CONSTANT glyph size (only position scales with
+                                                     zoom; flow__node_footprint), so a size delta is
+                                                     zoom-independent. The per-motion fp recompute
+                                                     makes the delta self-correcting vs n->w/n->h. */
+        int dh = scr.y - (fp.y + fp.h - 1);
+        if (dw || dh) flow_set_node_size(f, f->resize_node, n->w + dw, n->h + dh);  /* clamps >=1; coalesces in the open txn */
+      }
+      return;                                     /* OUT of flow__drag_in_flight (v1): no autopan / last_cursor */
     }
     if (!f->mouse_down) return;
     if (!f->moved && (scr.x != f->down_pos.x || scr.y != f->down_pos.y)) {
@@ -414,6 +452,12 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
       flow__undo_end(f);                       /* pairs with the press-time begin (no-drag click: empty txn) */
       return;
     }
+    if (f->resize_node != -1) {                  /* inc-8 #3: finish a resize drag */
+      f->resize_node = -1; f->resize_corner = -1;
+      f->mouse_down = 0; f->moved = 0;
+      flow__undo_end(f);                       /* pairs with the press-time begin (no-drag click: empty txn = no command) */
+      return;
+    }
     if (f->mouse_down && !f->moved) {            /* a click, not a drag */
       if (f->space_held) {
         /* space-pan click with no motion: a grab without a move. Do NOT clear the
@@ -489,6 +533,7 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     if (f->moved) f->last_click_node = -1;       /* any drag breaks a double-click pair */
     f->mouse_down = 0; f->moved = 0; f->drag_node = -1; f->dragging_pan = 0; f->down_node = -1;
     f->down_modsel = 0; f->marquee_active = 0; f->marquee_on = 0;
+    f->resize_node = -1; f->resize_corner = -1;  /* inc-8 #3: defensive — the resize-release branch returns early, but never leave a stale arm */
     f->helper.nvert = 0; f->helper.nhorz = 0;    /* guides never outlive the gesture (inc-5 #8) */
   }
 }

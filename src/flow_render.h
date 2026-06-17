@@ -285,6 +285,20 @@ static void flow__edge_toolbar(flow_t *f, flow_cellbuf *cb) {
     cx += w + 1;
   }
 }
+/* inc-8 #3: the node resizer — a single SE-corner resize grip (◢) on the lone selected node.
+   All gating lives in flow__resize_marker (resizer enabled, unlocked, single selection, LOD 0),
+   which the press-arm shares so the drawn grip == the hittable cell. RENDER-ONLY: the grip is
+   NOT pushed into widgets[] — that cache feeds the click-fire-and-consume widget loop, which
+   runs ABOVE the lock gate and would eat the resize press before a drag could begin. Wired
+   BEFORE the interactive widgets (controls/toolbars) so any widget sharing the corner cell
+   paints on top — matching the press precedence (the widget loop wins over the resize press-
+   arm). Gates on SELECTED (not hover), so render_handles_hover stays byte-identical; off by
+   default keeps every existing selected-node golden identical. Chrome color tracks color_mode. */
+static void flow__node_resizer(flow_t *f, flow_cellbuf *cb) {
+  flow_pt mc;
+  if (flow__resize_marker(f, &mc) == -1) return;
+  flow_cellbuf_put(cb, mc.x, mc.y, 0x25E2, f->theme.widget_fg, f->theme.widget_bg, 0);  /* ◢ SE grip */
+}
 void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
   flow_cellbuf cb = { out, cols, rows };
   flow_cellbuf_clear(&cb, f->theme.fg, f->theme.bg);
@@ -456,6 +470,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
 
   if (f->minimap.enabled) flow__minimap(f, &cb);
   f->nwidgets = 0;                                   /* inc-7 #3: refill the widget hit-rect cache each frame (controls + #4/#5 toolbars append below) */
+  flow__node_resizer(f, &cb);                        /* inc-8 #3: render-only SE grip; BEFORE the widgets so a coincident widget cell paints on top (matches press precedence: widget loop > resize arm) */
   if (f->controls.enabled) flow__controls(f, &cb);
   flow__node_toolbar(f, &cb);                        /* inc-7 #4: gated internally on actions + single selection */
   flow__edge_toolbar(f, &cb);                        /* inc-7 #5: gated on actions + a selected edge (exclusive with node toolbar) */
