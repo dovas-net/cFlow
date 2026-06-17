@@ -4,11 +4,8 @@ void flow_term_restore(void);
 int  flow_term_size(int *cols, int *rows);
 
 #ifdef FLOW_IMPLEMENTATION
-#include <termios.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <signal.h>
-#include <errno.h>
+/* POSIX headers (termios/unistd/sys-ioctl/signal/errno) are included by flow_head.h,
+   outside the header's extern "C" (a system header inside extern "C" is ill-formed). */
 static struct termios flow__saved_tio;
 static volatile sig_atomic_t flow__term_active = 0;   /* 1 while we own raw mode + the alt-screen */
 /* The restore sequence — the byte-exact inverse of flow_term_setup's enables:

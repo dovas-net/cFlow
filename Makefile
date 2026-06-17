@@ -1,4 +1,5 @@
 CC=cc
+CXX=c++
 CFLAGS=-std=c11 -O2 -Wall -Wextra
 LIBS=-lm
 TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input test_mouse test_select test_marquee test_keys test_connect test_edge test_zoom test_json test_groups test_events test_space_pan test_autopan test_undo test_layout test_flowchart test_extents test_viewport_events test_query test_focus test_clipboard test_helper test_culling test_search test_clock test_animated test_gates test_explicit_size test_node_resizer test_embed test_term test_alloc test_oom
@@ -25,6 +26,16 @@ test: flow.h
 	  fi; \
 	done; exit $$fail
 
+# C++ consumption check (H6). Not in `test` (needs a C++ compiler; CI gates it in Phase 2).
+# 1) flow.h compiles+runs AS the implementation under C++ (enum-init fix + custom-type
+#    C++ callbacks). 2) a C-compiled flow .o links against a C++ caller, proving extern "C".
+# -std=c++17 only (no -Wall) on the impl TU: the hand-tuned color-preset table uses C99
+# array designators, which clang/gcc accept as an extension (MSVC would not — see README).
+cpp: flow.h
+	$(CXX) -std=c++17 tests/cpp_smoke.cpp -o /tmp/flow_cpp_smoke $(LIBS) && /tmp/flow_cpp_smoke && echo "cpp_smoke: impl compiles+runs as C++ OK"
+	$(CC)  $(CFLAGS) -c tests/cpp_link_impl.c -o /tmp/flow_link_impl.o
+	$(CXX) -std=c++17 -Wall -Wextra tests/cpp_link_main.cpp /tmp/flow_link_impl.o -o /tmp/flow_cpp_link $(LIBS) && /tmp/flow_cpp_link && echo "cpp_link: C flow.o links against a C++ caller (extern \"C\") OK"
+
 clean:
 	rm -f demos/hello_flow demos/topo demos/flowchart examples/embed_headless $(addprefix tests/,$(TESTS)) flow.h
-.PHONY: all demos examples test clean
+.PHONY: all demos examples test cpp clean

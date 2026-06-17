@@ -11,6 +11,9 @@ modules="flow_head flow_geom flow_cell flow_model flow_undo flow_query flow_view
     echo "/* ===================== src/$m.h ===================== */"
     cat "src/$m.h"
   done
+  echo '#ifdef __cplusplus'        # close the extern "C" opened in flow_head.h
+  echo '}'
+  echo '#endif'
   echo '#endif /* FLOW_H */'
 } > "$out"
 echo "wrote $out"

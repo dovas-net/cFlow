@@ -10,8 +10,7 @@ void flow_feed(flow_t *f, const char *bytes, int n);
 void flow_run(flow_t *f);
 
 #ifdef FLOW_IMPLEMENTATION
-#include <poll.h>
-#include <errno.h>
+/* <poll.h>/<errno.h> are included by flow_head.h, outside the header's extern "C". */
 void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
 unsigned flow_ticks(flow_t *f) { return f->tick; }
 void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */

@@ -76,6 +76,21 @@
 #include <assert.h>
 #define FLOW_ASSERT(x)       assert(x)
 #endif
+/* POSIX/system headers used ONLY by the implementation (flow_term / flow_run).
+   Hoisted here — OUTSIDE the extern "C" below — because a system header inside
+   extern "C" is ill-formed and breaks libstdc++/libc++ on some platforms. The
+   amalgamator closes the extern "C" at the end of flow.h. */
+#ifdef FLOW_IMPLEMENTATION
+#include <termios.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <signal.h>
+#include <poll.h>
+#include <errno.h>
+#endif
+#ifdef __cplusplus
+extern "C" {
+#endif
 /* ===================== src/flow_geom.h ===================== */
 /* ===== geometry (pure, no I/O) ===== */
 typedef struct { int x, y; } flow_pt;
@@ -2735,13 +2750,13 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
   if (opts.fit_after) flow_fit_view(f, opts.margin);    /* viewport untouched without it */
 }
 void flow_layout_force(flow_t *f, flow_force_opts opts) {
-  flow_layout_opts o = {0};
+  flow_layout_opts o; memset(&o, 0, sizeof o);   /* not {0}: C++ won't widen 0 to the leading enum member */
   o.mode = FLOW_LAYOUT_FORCE;
   o.iterations = opts.iterations; o.k = opts.k; o.gravity = opts.gravity;
   flow_layout(f, o);
 }
 void flow_layout_layered(flow_t *f, flow_layered_dir dir, int gap_x, int gap_y) {
-  flow_layout_opts o = {0};
+  flow_layout_opts o; memset(&o, 0, sizeof o);   /* not {0}: C++ won't widen 0 to the leading enum member */
   o.mode = FLOW_LAYOUT_LAYERED;
   o.dir = dir; o.gap_x = gap_x; o.gap_y = gap_y;
   flow_layout(f, o);
@@ -4412,11 +4427,8 @@ void flow_term_restore(void);
 int  flow_term_size(int *cols, int *rows);
 
 #ifdef FLOW_IMPLEMENTATION
-#include <termios.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <signal.h>
-#include <errno.h>
+/* POSIX headers (termios/unistd/sys-ioctl/signal/errno) are included by flow_head.h,
+   outside the header's extern "C" (a system header inside extern "C" is ill-formed). */
 static struct termios flow__saved_tio;
 static volatile sig_atomic_t flow__term_active = 0;   /* 1 while we own raw mode + the alt-screen */
 /* The restore sequence — the byte-exact inverse of flow_term_setup's enables:
@@ -4497,8 +4509,7 @@ void flow_feed(flow_t *f, const char *bytes, int n);
 void flow_run(flow_t *f);
 
 #ifdef FLOW_IMPLEMENTATION
-#include <poll.h>
-#include <errno.h>
+/* <poll.h>/<errno.h> are included by flow_head.h, outside the header's extern "C". */
 void flow_tick(flow_t *f) { ++f->tick; }                       /* pure counter-advance — NO present, NO read, NO clock */
 unsigned flow_ticks(flow_t *f) { return f->tick; }
 void flow_set_tick_ms(flow_t *f, int ms) { f->tick_ms = ms < 1 ? 1 : ms; }  /* clamp: 0/negative → 1 (a 0 poll timeout would busy-spin) */
@@ -4597,6 +4608,9 @@ void flow_run(flow_t *f) {
     flow_present(f);
   }
   flow_term_restore();
+}
+#endif
+#ifdef __cplusplus
 }
 #endif
 #endif /* FLOW_H */

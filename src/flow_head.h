@@ -72,3 +72,18 @@
 #include <assert.h>
 #define FLOW_ASSERT(x)       assert(x)
 #endif
+/* POSIX/system headers used ONLY by the implementation (flow_term / flow_run).
+   Hoisted here — OUTSIDE the extern "C" below — because a system header inside
+   extern "C" is ill-formed and breaks libstdc++/libc++ on some platforms. The
+   amalgamator closes the extern "C" at the end of flow.h. */
+#ifdef FLOW_IMPLEMENTATION
+#include <termios.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <signal.h>
+#include <poll.h>
+#include <errno.h>
+#endif
+#ifdef __cplusplus
+extern "C" {
+#endif

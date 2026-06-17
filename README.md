@@ -116,6 +116,10 @@ re-raise).
 ## Requirements & platform
 
 - **C99 or later**, `-lm`.
+- **C++**: the header is `extern "C"`-guarded and compiles as a C++ translation unit
+  (clang/gcc, `-std=c++17`) — a C-compiled `flow.o` links against C++ callers (`make cpp`).
+  The color-preset table uses C99 array designators (accepted as an extension by clang/gcc),
+  so MSVC's C++ frontend is not yet supported.
 - The **interactive run-loop** (`flow_run` / `flow_feed` / `flow_present` / `flow_term_*`)
   needs a **POSIX terminal** (Linux / macOS).
 - The **model, geometry, rendering, routing, layout, and JSON layers are portable C** and

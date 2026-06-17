@@ -314,13 +314,13 @@ void flow_layout(flow_t *f, flow_layout_opts opts) {
   if (opts.fit_after) flow_fit_view(f, opts.margin);    /* viewport untouched without it */
 }
 void flow_layout_force(flow_t *f, flow_force_opts opts) {
-  flow_layout_opts o = {0};
+  flow_layout_opts o; memset(&o, 0, sizeof o);   /* not {0}: C++ won't widen 0 to the leading enum member */
   o.mode = FLOW_LAYOUT_FORCE;
   o.iterations = opts.iterations; o.k = opts.k; o.gravity = opts.gravity;
   flow_layout(f, o);
 }
 void flow_layout_layered(flow_t *f, flow_layered_dir dir, int gap_x, int gap_y) {
-  flow_layout_opts o = {0};
+  flow_layout_opts o; memset(&o, 0, sizeof o);   /* not {0}: C++ won't widen 0 to the leading enum member */
   o.mode = FLOW_LAYOUT_LAYERED;
   o.dir = dir; o.gap_x = gap_x; o.gap_y = gap_y;
   flow_layout(f, o);
