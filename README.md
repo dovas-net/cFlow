@@ -104,6 +104,15 @@ buffer instead of a diff, call `flow_render(f, cells, cols, rows)` and read the 
 grid yourself. See **[`examples/embed_headless.c`](examples/embed_headless.c)** for a complete,
 TTY-free program (`make examples`).
 
+**Terminal safety.** If you take the POSIX terminal path (`flow_run`, or `flow_term_setup`
+directly), `flow` installs `SIGINT`/`SIGTERM` and crash (`SIGSEGV`/`SIGABRT`/…) handlers that
+restore the terminal — raw mode, alt-screen, cursor, mouse tracking — and an `atexit` hook for
+stray `exit()` calls, then chain to the previous handler so the process still dies with the
+right status. The handlers are removed on `flow_term_restore`, and the headless path above
+never installs them. If instead you put the terminal in raw mode **yourself**, restore it on
+those signals yourself (async-signal-safely: `write()` the reset escape + `tcsetattr`, then
+re-raise).
+
 ## Requirements & platform
 
 - **C99 or later**, `-lm`.
@@ -120,7 +129,7 @@ TTY-free program (`make examples`).
 
 ```sh
 make            # regenerate flow.h and build the demos + examples
-make test       # run the headless test suite (36 suites, snapshot goldens)
+make test       # run the headless test suite (37 suites, snapshot goldens)
 ```
 
 See `docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design, and
