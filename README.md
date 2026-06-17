@@ -136,7 +136,8 @@ make            # regenerate flow.h and build the demos + examples
 make test       # run the headless test suite (39 suites, snapshot goldens)
 ```
 
-See `docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design, and
+See [`docs/API.md`](docs/API.md) for the per-function API reference,
+`docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design, and
 [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ## Credits
