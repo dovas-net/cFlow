@@ -37,6 +37,13 @@
  * layers are pure C and embeddable with the host's own I/O. Not thread-safe:
  * serialize calls per flow_t; separate instances are independent.
  *
+ * Out-of-memory: flow_new returns NULL and flow_add_node / flow_add_edge return
+ * -1 on allocation failure, leaving the graph unmodified (their undo recording is
+ * dropped, never fatal). Other paths — render/layout scratch and the
+ * selection/clipboard/remove snapshot buffers — currently assume allocation
+ * succeeds; #define a FLOW_MALLOC that aborts on failure to make every path
+ * fail-fast instead.
+ *
  * Credits: terminal raw-mode and escape-sequence approach inspired by tuibox
  * (Cubified, https://github.com/Cubified/tuibox), implemented independently from
  * the standard termios idiom and ANSI/SGR escape sequences. Concepts and API
@@ -732,9 +739,11 @@ struct flow {
   } journal;
 };
 static void *flow__grow(void *arr, int *cap, int need, size_t sz) {
-  if (need <= *cap) return arr;
+  if (need <= *cap) return arr;                  /* need>=1 always, so a no-grow return is non-NULL */
   int c = *cap ? *cap : 8; while (c < need) c *= 2;
-  arr = FLOW_REALLOC(arr, (size_t)c * sz); *cap = c; return arr;
+  void *p = FLOW_REALLOC(arr, (size_t)c * sz);
+  if (!p) return NULL;                           /* OOM: caller KEEPS its old arr; *cap untouched (no leak) */
+  *cap = c; return p;                            /* NULL return is unambiguously OOM (success is never NULL) */
 }
 /* ---- undo journal: recording primitives (PURE DATA — never call mutators, so they are
    safe to invoke from this module; the appliers live in flow_undo.h, after flow_model) ---- */
@@ -787,13 +796,17 @@ static void flow__rec_push(flow_t *f, flow__op op) {
               (size_t)(f->journal.n - 1) * sizeof *f->journal.items);
       f->journal.n--;
     }
-    f->journal.items = (struct flow__cmd*)flow__grow(f->journal.items, &f->journal.cap,
-                                                     f->journal.n + 1, sizeof *f->journal.items);
+    struct flow__cmd *items = (struct flow__cmd*)flow__grow(f->journal.items, &f->journal.cap,
+                                                            f->journal.n + 1, sizeof *f->journal.items);
+    if (!items) return;                            /* OOM: drop the undo record; the mutation already applied */
+    f->journal.items = items;
     c = &f->journal.items[f->journal.n++];
     memset(c, 0, sizeof *c);
     if (f->journal.txn_depth > 0) f->journal.txn_base = f->journal.n - 1;  /* first record opens the txn's command */
   }
-  c->ops = (flow__op*)flow__grow(c->ops, &c->opcap, c->nops + 1, sizeof *c->ops);
+  flow__op *ops = (flow__op*)flow__grow(c->ops, &c->opcap, c->nops + 1, sizeof *c->ops);
+  if (!ops) return;                                /* OOM: drop this op (command kept; empty-cmd undo is a benign no-op) */
+  c->ops = ops;
   c->ops[c->nops++] = op;
 }
 void flow__undo_begin(flow_t *f) {
@@ -909,6 +922,7 @@ static void flow__rec_reparent(flow_t *f, int child, int from_parent, flow_pt fr
 }
 flow_t *flow_new(int cols, int rows) {
   flow_t *f = (flow_t*)FLOW_CALLOC(1, sizeof *f);
+  if (!f) return NULL;                                         /* OOM: documented NULL return */
   f->view.zoom = 1; f->zmin = FLOW_ZOOM_MIN; f->zmax = FLOW_ZOOM_MAX;
   f->cols = cols; f->rows = rows; f->nextid = 1; f->nexteid = 1;
   f->drag_node = -1; f->marquee_mode = FLOW_SELECT_PARTIAL; f->conn_node = -1; f->focus_node = -1;
@@ -920,6 +934,7 @@ flow_t *flow_new(int cols, int rows) {
   flow_set_color_mode(f, FLOW_COLOR_DEFAULT);                  /* inc-7 #1: seed the legacy 7/0/8 preset (calloc-zero would be black-on-black) */
   f->journal.limit = 128; f->journal.txn_base = -1;
   f->front = (flow_cell*)FLOW_CALLOC((size_t)cols * rows, sizeof(flow_cell));
+  if (!f->front && (size_t)cols * rows != 0) { FLOW_FREE(f); return NULL; }   /* OOM: free partial construction */
   return f;
 }
 /* free the clipboard's owned memory: each edge snap's label_copy + the arrays.
@@ -959,12 +974,14 @@ void flow_resize(flow_t *f, int cols, int rows) {
   f->front = (flow_cell*)FLOW_CALLOC((size_t)cols * rows, sizeof(flow_cell));
 }
 void flow_register_node_type(flow_t *f, const flow_node_type *t) {
-  f->ntypes = (const flow_node_type**)FLOW_REALLOC(f->ntypes, (f->nntypes + 1) * sizeof *f->ntypes);
-  f->ntypes[f->nntypes++] = t;
+  const flow_node_type **p = (const flow_node_type**)FLOW_REALLOC(f->ntypes, (f->nntypes + 1) * sizeof *f->ntypes);
+  if (!p) return;                                    /* OOM: drop the registration (old array intact, no leak) */
+  f->ntypes = p; f->ntypes[f->nntypes++] = t;
 }
 void flow_register_edge_type(flow_t *f, const flow_edge_type *t) {
-  f->etypes = (const flow_edge_type**)FLOW_REALLOC(f->etypes, (f->netypes + 1) * sizeof *f->etypes);
-  f->etypes[f->netypes++] = t;
+  const flow_edge_type **p = (const flow_edge_type**)FLOW_REALLOC(f->etypes, (f->netypes + 1) * sizeof *f->etypes);
+  if (!p) return;                                    /* OOM: drop the registration (old array intact, no leak) */
+  f->etypes = p; f->etypes[f->netypes++] = t;
 }
 const flow_node_type *flow_node_type_for(flow_t *f, const char *type) {
   for (int i = 0; i < f->nntypes; i++) if (strcmp(f->ntypes[i]->type, type) == 0) return f->ntypes[i];
@@ -982,7 +999,9 @@ void flow_measure_node(flow_t *f, flow_node *n) {
   else { n->w = 4; n->h = 3; }
 }
 int flow_add_node(flow_t *f, const char *type, flow_pt pos, void *data) {
-  f->nodes = (flow_node*)flow__grow(f->nodes, &f->capnodes, f->nnodes + 1, sizeof(flow_node));
+  flow_node *grown = (flow_node*)flow__grow(f->nodes, &f->capnodes, f->nnodes + 1, sizeof(flow_node));
+  if (!grown) return -1;                                       /* OOM: graph unchanged (nnodes not advanced) */
+  f->nodes = grown;
   flow_node *n = &f->nodes[f->nnodes++]; memset(n, 0, sizeof *n);
   n->id = f->nextid++; snprintf(n->type, sizeof n->type, "%s", type ? type : "default");
   n->pos = pos; n->parent = -1; n->data = data; flow_measure_node(f, n);
@@ -1136,6 +1155,7 @@ int flow_group(flow_t *f, const int *ids, int n) {
   flow_pt gpos = { bb.x - pad, bb.y - pad };
   int gw = bb.w + 2 * pad, gh = bb.h + 2 * pad;
   int gid = flow_add_node(f, "group", gpos, NULL);   /* measure is a no-op write-back; w/h set next */
+  if (gid < 0) { flow__undo_end(f); return -1; }     /* OOM: nothing added, no members reparented */
   flow_node *g = flow_get_node(f, gid);              /* re-fetch: array may have realloc'd */
   if (g) { g->w = gw; g->h = gh; }                   /* direct write: captured by the ADD snap at undo time */
   for (int i = 0; i < n; i++) {                       /* reparent members (abs preserved) */
@@ -1192,7 +1212,9 @@ static const char *flow__resolve_target_handle(flow_t *f, int node, const char *
 }
 int flow_add_edge(flow_t *f, int src, int dst, const char *sh, const char *th) {
   if (!flow__connection_would_accept(f, src, dst, sh, th, -1)) return -1;  /* the one shared gate */
-  f->edges = (flow_edge*)flow__grow(f->edges, &f->capedges, f->nedges + 1, sizeof(flow_edge));
+  flow_edge *grown = (flow_edge*)flow__grow(f->edges, &f->capedges, f->nedges + 1, sizeof(flow_edge));
+  if (!grown) return -1;                                       /* OOM: graph unchanged (nedges not advanced) */
+  f->edges = grown;
   flow_edge *e = &f->edges[f->nedges++]; memset(e, 0, sizeof *e);
   e->id = f->nexteid++; e->source = src; e->target = dst;
   snprintf(e->source_handle, sizeof e->source_handle, "%s", sh ? sh : "");
@@ -1608,6 +1630,7 @@ static int flow__paste_snaps(flow_t *f, const flow__node_snap *ns, int nn,
   if (nn == 0) return 0;
   unsigned long sig = flow__sel_sig(f);
   int *newid = (int*)FLOW_MALLOC((size_t)nn * sizeof(int));
+  if (!newid) return 0;                                       /* OOM: paste nothing rather than deref NULL */
   flow__undo_begin(f);
   f->cb_suppress++;                                          /* one notify at the end */
   for (int i = 0; i < nn; i++) {

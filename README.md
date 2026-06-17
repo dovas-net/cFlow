@@ -129,7 +129,7 @@ re-raise).
 
 ```sh
 make            # regenerate flow.h and build the demos + examples
-make test       # run the headless test suite (38 suites, snapshot goldens)
+make test       # run the headless test suite (39 suites, snapshot goldens)
 ```
 
 See `docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design, and

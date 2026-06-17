@@ -33,6 +33,13 @@
  * layers are pure C and embeddable with the host's own I/O. Not thread-safe:
  * serialize calls per flow_t; separate instances are independent.
  *
+ * Out-of-memory: flow_new returns NULL and flow_add_node / flow_add_edge return
+ * -1 on allocation failure, leaving the graph unmodified (their undo recording is
+ * dropped, never fatal). Other paths — render/layout scratch and the
+ * selection/clipboard/remove snapshot buffers — currently assume allocation
+ * succeeds; #define a FLOW_MALLOC that aborts on failure to make every path
+ * fail-fast instead.
+ *
  * Credits: terminal raw-mode and escape-sequence approach inspired by tuibox
  * (Cubified, https://github.com/Cubified/tuibox), implemented independently from
  * the standard termios idiom and ANSI/SGR escape sequences. Concepts and API
