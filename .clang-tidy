@@ -1,0 +1,15 @@
+# Static analysis for flow (C11). clang-tidy ships with Homebrew llvm (keg-only):
+#   /opt/homebrew/opt/llvm/bin/clang-tidy <file.c> -- -std=c11
+# There's no compile_commands.json, so pass flags after `--`. Analyze a TU that
+# pulls in the whole library, e.g. a test:
+#   /opt/homebrew/opt/llvm/bin/clang-tidy tests/test_smoke.c -- -std=c11
+# HeaderFilterRegex limits reports to flow.h (the amalgamated library source).
+#
+# Conservative, high-signal set: bugprone + clang-analyzer, minus checks that are
+# pure noise for this codebase — easily-swappable-parameters (geometry takes lots of
+# (int x, int y)), narrowing-conversions (intentional float<->int math), and
+# switch-missing-default-case (switches over FLOW_CMD_* are exhaustive by design).
+Checks: '-*,bugprone-*,clang-analyzer-*,-bugprone-easily-swappable-parameters,-bugprone-narrowing-conversions,-bugprone-switch-missing-default-case,-clang-analyzer-security.insecureAPI.*'
+WarningsAsErrors: ''
+HeaderFilterRegex: 'flow\.h$'
+FormatStyle: none

@@ -1,0 +1,32 @@
+# ⚠️  DO NOT bulk-format existing src/ with this config.
+# The existing code is deliberately hand-tuned (compact one-line structs/enums,
+# column-aligned trailing comments, manual alignment). clang-format CANNOT preserve
+# that — running it over src/ reflows ~66% of the codebase (one-line aggregates get
+# exploded to multi-line, alignment collapsed). Measured: 2944 of 4441 lines change.
+#
+# This file exists as a loose style GUIDE for brand-NEW files only, and to pin a
+# consistent baseline (2-space, attach braces, no rewrapping) rather than let an
+# editor fall back to its built-in default. Format a single new file explicitly:
+#   clang-format -i path/to/new_file.c
+# Never `clang-format -i src/*.h`.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 0
+BreakBeforeBraces: Attach
+PointerAlignment: Right
+SpaceBeforeParens: ControlStatements
+AllowShortFunctionsOnASingleLine: All
+AllowShortBlocksOnASingleLine: Always
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AlignTrailingComments:
+  Kind: Leave
+KeepEmptyLinesAtTheStartOfBlocks: false
+IndentCaseLabels: true
+SortIncludes: false
+...

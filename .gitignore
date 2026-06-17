@@ -6,3 +6,8 @@ tests/test_*
 demos/hello_flow
 demos/topo
 demos/flowchart
+# personal / local config (not shared)
+CLAUDE.local.md
+.claude/settings.local.json
+# internal release-readiness roadmap (candid; keep local)
+docs/RELEASE-READINESS.md

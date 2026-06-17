@@ -1,0 +1,44 @@
+# Changelog
+
+All notable changes to this project are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
+to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While at `0.x`, the
+public API may change between minor versions; it will be locked at `1.0.0`.
+
+## [Unreleased]
+
+## [0.1.0] - 2026-06-17
+
+First public release. `flow` is a single-header C library (`flow.h`) for building
+interactive node-graph editors in the terminal — a C/terminal analog of
+[xyflow](https://github.com/xyflow/xyflow) (React Flow). Dependency-free (pure ANSI
+escapes; links `-lm`).
+
+### Added
+- Single-header distribution: `#define FLOW_IMPLEMENTATION` in one translation unit,
+  generated from `src/` by `tools/amalgamate.sh`.
+- Nodes and edges with a custom-type system (measure/render vtables of function pointers).
+- Handles with connect / reconnect and a pluggable connection validator.
+- Edge labels and straight / orthogonal (step) edge routing.
+- Selection: single, multi, and marquee.
+- Node dragging with auto-pan; per-element interaction gates (draggable / selectable /
+  deletable); SE-corner node resizer with explicit, persisted node sizes.
+- Viewport: pan (arrows / drag / scroll), pointer-centered zoom with limits, fit-view,
+  and level-of-detail collapsing.
+- Minimap, controls, status bar, and node/edge toolbars.
+- Subflows / node groups (`flow_group` / `flow_ungroup` / `flow_set_parent`).
+- Undo / redo via a command journal with coalescing.
+- Force-directed and layered (Sugiyama-style) auto-layout.
+- JSON save / load (versioned save format).
+- Theming: DEFAULT / LIGHT / DARK color modes, theme tokens, and backgrounds (dots /
+  lines / cross).
+- A damage-diffed cell compositor and a run-loop (`flow_run` / `flow_feed` / `flow_present`).
+- Test suite: 35 headless suites with byte-exact UTF-8 snapshot goldens.
+
+### Notes
+- The interactive run-loop (`flow_run` / `flow_feed` / `flow_present` / `flow_term_*`)
+  requires a POSIX terminal (Linux / macOS). The model, geometry, rendering, routing,
+  layout, and JSON layers are portable C99 and embeddable with the host's own I/O.
+
+[Unreleased]: https://github.com/dovas-net/cFlow/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dovas-net/cFlow/releases/tag/v0.1.0
