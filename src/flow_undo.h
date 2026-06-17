@@ -117,6 +117,15 @@ static void flow__apply_op(flow_t *f, flow__op *op, int redo) {
       if (c) c->pos = redo ? op->u.reparent.to_pos : op->u.reparent.from_pos;
       break;
     }
+    case FLOW_CMD_RESIZE_NODE:                        /* replay the SAME w/h it accepted; applying-gated => no re-record */
+      flow_set_node_size(f, op->u.resize.id, redo ? op->u.resize.tw : op->u.resize.fw,
+                                             redo ? op->u.resize.th : op->u.resize.fh);
+      if (!redo && !op->u.resize.from_explicit) {     /* undo of a once-auto node: the setter re-set the flag — drop it
+                                                         again so a later data change re-measures (apply→undo equality) */
+        flow_node *n = flow_get_node(f, op->u.resize.id);
+        if (n) n->flags &= ~(unsigned)FLOW_EXPLICIT_SIZE;
+      }
+      break;
   }
   if (redo) { f->nextid = op->nid1; f->nexteid = op->eid1; }
   else      { f->nextid = op->nid0; f->nexteid = op->eid0; }

@@ -59,6 +59,12 @@ int flow_save(flow_t *f, const char *path) {
     if (n->flags & FLOW_NODRAG)   fputs(",\"draggable\":false",  out);
     if (n->flags & FLOW_NOSELECT) fputs(",\"selectable\":false", out);
     if (n->flags & FLOW_NODELETE) fputs(",\"deletable\":false",  out);
+    /* inc-8 #2: explicit user size — w/h are otherwise re-derived by flow_measure_node on load, so
+       emit them ONLY when FLOW_EXPLICIT_SIZE is set (a default node stays byte-identical). */
+    if (n->flags & FLOW_EXPLICIT_SIZE) fprintf(out, ",\"w\":%d,\"h\":%d", n->w, n->h);
+    /* inc-8 #2 (the #1-deferred follow-up): FLOW_EXTENT_PARENT now migrates onto the on-disk rail,
+       same emit-when-set discipline so no golden churns. */
+    if (n->flags & FLOW_EXTENT_PARENT) fputs(",\"extentParent\":true", out);
     const flow_node_type *t = flow_node_type_for(f, n->type);
     if (t && t->save) { fputs(",\"data\":", out); t->save(n, out); }
     fputc('}', out);
@@ -354,6 +360,18 @@ int flow_load(flow_t *f, const char *path) {
         if (flow__json_find(elem, eend, "draggable",  &gv) && flow__json_raw(gv, &gs, &gl) && gl == 5 && memcmp(gs, "false", 5) == 0) n->flags |= FLOW_NODRAG;
         if (flow__json_find(elem, eend, "selectable", &gv) && flow__json_raw(gv, &gs, &gl) && gl == 5 && memcmp(gs, "false", 5) == 0) n->flags |= FLOW_NOSELECT;
         if (flow__json_find(elem, eend, "deletable",  &gv) && flow__json_raw(gv, &gs, &gl) && gl == 5 && memcmp(gs, "false", 5) == 0) n->flags |= FLOW_NODELETE; }
+      /* inc-8 #2: explicit size + extent-parent. Restored BEFORE flow_measure_node below so the
+         EXPLICIT_SIZE measure-skip guard preserves the on-disk w/h; absent w/h => auto-measured as
+         before (no flag). Direct field writes (not the public setter) so load journals nothing and
+         the clamp matches the setter. extentParent: only the literal true sets the bit. */
+      { flow_json_rd sv; int sw = 0, sh = 0;
+        int has_w = flow__json_find(elem, eend, "w", &sv) && flow__json_int(sv, &sw);
+        int has_h = flow__json_find(elem, eend, "h", &sv) && flow__json_int(sv, &sh);
+        if (has_w && has_h) {
+          n->w = sw < 1 ? 1 : sw; n->h = sh < 1 ? 1 : sh; n->flags |= FLOW_EXPLICIT_SIZE;
+        }
+        const char *es; int el;
+        if (flow__json_find(elem, eend, "extentParent", &sv) && flow__json_raw(sv, &es, &el) && el == 4 && memcmp(es, "true", 4) == 0) n->flags |= FLOW_EXTENT_PARENT; }
       /* data hook BEFORE measure (device measure reads n->data) */
       const flow_node_type *t = flow_node_type_for(f, n->type);
       if (t && t->load) {

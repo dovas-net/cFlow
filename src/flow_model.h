@@ -1,10 +1,15 @@
 /* ===== model: engine, nodes, edges, vtable types, transform, bounds, hit-test ===== */
 enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 8u, FLOW_EXTENT_PARENT = 16u, FLOW_ANIMATED = 32u,
-       FLOW_NODRAG = 64u, FLOW_NOSELECT = 128u, FLOW_NODELETE = 256u };
+       FLOW_NODRAG = 64u, FLOW_NOSELECT = 128u, FLOW_NODELETE = 256u, FLOW_EXPLICIT_SIZE = 512u };
 /* inc-8 #1 per-element interaction gates (xyflow draggable/selectable/deletable=false). NEGATIVE
    polarity: calloc-zero == permissive default, so flow_add_node needs no seed. DURABLE, unlike the
    transient bits above — persisted (named bools in flow_json, emit-when-set) and undo-durable (they
    sit OUTSIDE flow_undo's SELECTED|DRAGGING|HOVERED clear mask, so a restored node keeps its gate). */
+/* inc-8 #2 FLOW_EXPLICIT_SIZE (512u): a user-set w/h (flow_set_node_size) that SKIPS auto-measure
+   (guards the top of flow_measure_node, covering add/paste/load at once) and PERSISTS as ,"w":N,"h":N
+   emitted only when set. Like the gates it is DURABLE: outside the transient-clear mask (survives
+   undo) and on the on-disk rail. The resize itself IS journaled (FLOW_CMD_RESIZE_NODE) so a resize
+   gesture is one undo step — unlike the config-toggle gate setters which record nothing. */
 /* FLOW_EXTENT_PARENT gates flow_move_node's child-inside-parent clamp; set/clear
    directly on n->flags. FLOW_HIDDEN is a VIEW-level skip (render, hit, marquee,
    bounds, minimap, handles) set via flow_set_node_hidden / flow_set_edge_hidden;
@@ -223,6 +228,11 @@ void flow_set_edge_animated(flow_t *f, int id, int on); /* inc-6 #5: marching-an
 void flow_set_node_draggable(flow_t *f, int id, int on);   /* on==0 sets FLOW_NODRAG  — held fixed under user drag + shift-arrow nudge */
 void flow_set_node_selectable(flow_t *f, int id, int on);  /* on==0 sets FLOW_NOSELECT — not selectable by pointer/keyboard (public select API stays open) */
 void flow_set_node_deletable(flow_t *f, int id, int on);   /* on==0 sets FLOW_NODELETE — survives delete-selection as a root (direct remove + cascade unaffected) */
+/* inc-8 #2 — set an explicit node size that survives auto-measure (sets FLOW_EXPLICIT_SIZE) and
+   persists across save/load. w,h clamp to >= 1; no-op on unknown id. JOURNALED (FLOW_CMD_RESIZE_NODE,
+   coalescing within an open txn like flow_move_node) so package 3's resize gesture, bracketed in
+   flow__undo_begin/end, is ONE undo step — this is the rail the node-resizer writes through. */
+void flow_set_node_size(flow_t *f, int id, int w, int h);
 void flow_set_autopan(flow_t *f, int margin, int speed); /* tune the drag auto-pan band (defaults 3/2): margin = band width in cells, speed = step per motion event; negatives clamp to 0, margin 0 disables */
 
 /* inc-6 #4 redraw-clock — deterministic animation clock (declarations; impls live in
@@ -266,7 +276,8 @@ typedef enum {
   FLOW_CMD_ADD_NODE, FLOW_CMD_REMOVE_NODE,   /* REMOVE_NODE snapshots the whole subtree */
   FLOW_CMD_ADD_EDGE, FLOW_CMD_REMOVE_EDGE,
   FLOW_CMD_MOVE_NODE, FLOW_CMD_RECONNECT_EDGE, FLOW_CMD_SET_LABEL,
-  FLOW_CMD_REPARENT                          /* groups: invert flow_set_parent/group/ungroup */
+  FLOW_CMD_REPARENT,                         /* groups: invert flow_set_parent/group/ungroup */
+  FLOW_CMD_RESIZE_NODE                       /* inc-8 #2: invert flow_set_node_size (w/h pair) */
 } flow_cmd_kind;
 
 typedef struct { int id, index; flow_node node; } flow__node_snap;   /* node.data borrowed */
@@ -283,6 +294,7 @@ typedef struct flow__op {
              flow__edge_snap *edges; int ne; } subtree;               /* REMOVE_NODE */
     struct { flow__edge_snap snap; } edge;                            /* ADD_EDGE / REMOVE_EDGE */
     struct { int id; flow_pt from, to; } move;                        /* MOVE_NODE (ABSOLUTE coords) */
+    struct { int id, fw, fh, tw, th, from_explicit; } resize;         /* RESIZE_NODE (from/to w,h + prior FLOW_EXPLICIT_SIZE bit, so undo restores a previously-auto node's absence of the flag) */
     struct { int id, which, from_node, to_node;
              char from_handle[16], to_handle[16]; } reconnect;        /* RECONNECT_EDGE */
     struct { int id; char *from, *to; } label;                        /* SET_LABEL (owned dups, may be NULL) */
@@ -557,6 +569,20 @@ static void flow__rec_move(flow_t *f, int id, flow_pt from_abs, flow_pt to_abs) 
   op.u.move.id = id; op.u.move.from = from_abs; op.u.move.to = to_abs;
   flow__rec_push(f, op);
 }
+static void flow__rec_resize(flow_t *f, int id, int fw, int fh, int tw, int th, int from_explicit) {
+  if (f->journal.txn_depth > 0 && f->journal.txn_base >= 0) {  /* coalesce within the open txn (like move) */
+    struct flow__cmd *c = &f->journal.items[f->journal.txn_base];
+    for (int i = 0; i < c->nops; i++)
+      if (c->ops[i].kind == FLOW_CMD_RESIZE_NODE && c->ops[i].u.resize.id == id) {
+        c->ops[i].u.resize.tw = tw; c->ops[i].u.resize.th = th;  /* keep first from-size + from_explicit, overwrite to-size */
+        return;
+      }
+  }
+  flow__op op = flow__op_base(f, FLOW_CMD_RESIZE_NODE);
+  op.u.resize.id = id; op.u.resize.fw = fw; op.u.resize.fh = fh; op.u.resize.tw = tw; op.u.resize.th = th;
+  op.u.resize.from_explicit = from_explicit;          /* prior flag bit: undo of a once-auto node must drop the flag again */
+  flow__rec_push(f, op);
+}
 static void flow__rec_remove_edge(flow_t *f, const flow_edge *e, int index) {
   flow__op op = flow__op_base(f, FLOW_CMD_REMOVE_EDGE);
   op.u.edge.snap.id = e->id; op.u.edge.snap.index = index;
@@ -682,6 +708,8 @@ const flow_edge_type *flow_edge_type_for(flow_t *f, const char *type) {
   return NULL;
 }
 void flow_measure_node(flow_t *f, flow_node *n) {
+  if (n->flags & FLOW_EXPLICIT_SIZE) return;           /* inc-8 #2: a user-sized node keeps its w/h
+                                                          at every call site (add/paste/load) */
   const flow_node_type *t = flow_node_type_for(f, n->type);
   if (t && t->measure) { int w = 0, h = 0; t->measure(n, &w, &h); n->w = w; n->h = h; }
   else { n->w = 4; n->h = 3; }
@@ -1325,8 +1353,12 @@ static int flow__paste_snaps(flow_t *f, const flow__node_snap *ns, int nn,
                                                                 flow_group post-add idiom). The
                                                                 ADD_NODE snap captures it at undo
                                                                 time, so undo/redo round-trips. */
-      pn->flags |= (ns[i].node.flags & FLOW_EXTENT_PARENT);  /* behavior flag carries;
-                                                                transient flags do not */
+      pn->flags |= (ns[i].node.flags & (FLOW_EXTENT_PARENT | FLOW_EXPLICIT_SIZE));  /* behavior flags carry;
+                                                                transient flags do not. EXPLICIT_SIZE
+                                                                must ride along with the copied w/h
+                                                                above (inc-8 #2) — copied size without
+                                                                the flag would be dropped by the next
+                                                                re-measure/save. */
     }
   }
   for (int i = 0; i < nn; i++) {                             /* reparent inside the pasted set */
@@ -1467,6 +1499,17 @@ void flow_set_edge_animated(flow_t *f, int id, int on) {        /* inc-6 #5: mir
 void flow_set_node_draggable(flow_t *f, int id, int on)  { flow_node *n = flow_get_node(f, id); if (!n) return; if (on) n->flags &= ~(unsigned)FLOW_NODRAG;   else n->flags |= FLOW_NODRAG; }
 void flow_set_node_selectable(flow_t *f, int id, int on) { flow_node *n = flow_get_node(f, id); if (!n) return; if (on) n->flags &= ~(unsigned)FLOW_NOSELECT; else n->flags |= FLOW_NOSELECT; }
 void flow_set_node_deletable(flow_t *f, int id, int on)  { flow_node *n = flow_get_node(f, id); if (!n) return; if (on) n->flags &= ~(unsigned)FLOW_NODELETE; else n->flags |= FLOW_NODELETE; }
+/* inc-8 #2: set explicit w/h + the durable FLOW_EXPLICIT_SIZE flag. Unlike the gate setters this is
+   JOURNALED (the resize-as-drag analog of flow_move_node) — it records a RESIZE_NODE op so the change
+   is undoable on its own AND coalesces inside a package-3 gesture txn into one step. */
+void flow_set_node_size(flow_t *f, int id, int w, int h) {
+  flow_node *n = flow_get_node(f, id);
+  if (!n) return;
+  if (w < 1) w = 1;                                  /* clamp to a renderable minimum */
+  if (h < 1) h = 1;
+  if (flow__rec_gate(f)) flow__rec_resize(f, id, n->w, n->h, w, h, (n->flags & FLOW_EXPLICIT_SIZE) != 0);  /* record BEFORE the write (from = current size + flag) */
+  n->w = w; n->h = h; n->flags |= FLOW_EXPLICIT_SIZE;
+}
 void flow_set_statusbar(flow_t *f, int enabled) { f->statusbar = enabled ? 1 : 0; }
 void flow_set_autopan(flow_t *f, int margin, int speed) {
   f->autopan_margin = margin < 0 ? 0 : margin;   /* 0 = no band = disabled */
