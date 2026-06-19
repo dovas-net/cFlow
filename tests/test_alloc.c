@@ -3,6 +3,13 @@
    workload routes every allocation kind through the macros (the embeddability
    contract: an arena/tracker can intercept all of flow's heap traffic). */
 #define FLOW_IMPLEMENTATION
+/* This TU includes <stdlib.h> before flow.h (the counting FLOW_MALLOC wrappers call
+   malloc), so request glibc's POSIX feature set HERE, before stdlib locks features.h —
+   otherwise flow.h's own _DEFAULT_SOURCE arrives too late and struct sigaction is hidden
+   under -std=c11. Linux/glibc only; harmless elsewhere. */
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
 #include <stdlib.h>
 static long g_malloc = 0, g_calloc = 0, g_realloc = 0, g_free = 0, g_live = 0;
 static void *cnt_malloc(size_t n)            { g_malloc++;  g_live++; return malloc(n); }

@@ -122,6 +122,11 @@ re-raise).
   (clang/gcc, `-std=c++17`) — a C-compiled `flow.o` links against C++ callers (`make cpp`).
   The color-preset table uses C99 array designators (accepted as an extension by clang/gcc),
   so MSVC's C++ frontend is not yet supported.
+- **Linux / glibc:** under strict `-std=c11`, glibc hides the POSIX symbols the
+  implementation needs (`sigaction`, `ioctl`, `poll`) behind a feature-test macro. `flow.h`
+  requests it (`_DEFAULT_SOURCE`) before its own includes, so in the implementation TU
+  **include `flow.h` before any other system header** — or compile with `-D_DEFAULT_SOURCE`
+  (or `-std=gnu11`). macOS and the BSDs need none of this.
 - The **interactive run-loop** (`flow_run` / `flow_feed` / `flow_present` / `flow_term_*`)
   needs a **POSIX terminal** (Linux / macOS).
 - The **model, geometry, rendering, routing, layout, and JSON layers are portable C** and

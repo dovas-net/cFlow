@@ -51,6 +51,16 @@
 #define FLOW_VERSION_PATCH 0
 #define FLOW_VERSION (FLOW_VERSION_MAJOR * 10000 + FLOW_VERSION_MINOR * 100 + FLOW_VERSION_PATCH)
 #define FLOW_VERSION_STRING "0.3.0"
+/* Under strict -std=c11, glibc hides POSIX/BSD symbols the implementation needs
+   (struct sigaction / sigaction / sigfillset, ioctl / struct winsize, poll) behind a
+   feature-test macro. Request them BEFORE the first system header is pulled (the include
+   below locks glibc's feature set). Linux/glibc only — macOS and the BSDs expose these by
+   default, and defining a feature macro there can instead HIDE BSD symbols. Harmless in
+   declaration-only TUs (they include no POSIX headers). __linux__ is a compiler builtin,
+   so it is reliable before any include; __GLIBC__ would not be. */
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>

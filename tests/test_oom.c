@@ -3,6 +3,13 @@
    -1, and — the part an embedder actually cares about — the failure is RECOVERABLE,
    not a one-way wedge: the graph is unchanged and the next op succeeds. */
 #define FLOW_IMPLEMENTATION
+/* This TU includes <stdlib.h> before flow.h (the fail-after-N allocator wrappers call
+   malloc), so request glibc's POSIX feature set HERE, before stdlib locks features.h —
+   otherwise flow.h's own _DEFAULT_SOURCE arrives too late and struct sigaction is hidden
+   under -std=c11. Linux/glibc only; harmless elsewhere. */
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
 #include <stdlib.h>
 static int  g_fail_at = -1;          /* -1 = never fail; else fail once the counter reaches it */
 static long g_alloc_n = 0;
