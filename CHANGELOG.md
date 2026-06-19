@@ -7,6 +7,18 @@ public API may change between minor versions; it will be locked at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-19
+
+### Fixed
+- **Compiles on Linux/glibc under `-std=c11`.** glibc gated the POSIX/BSD symbols the
+  implementation needs (`struct sigaction` / `sigaction` / `sigfillset`, `ioctl` /
+  `struct winsize`, `poll`) behind a feature-test macro, so the implementation TU failed to
+  compile under strict `-std=c11` — latent since the v0.2.0 signal handlers (macOS libc
+  exposes these by default, which hid the bug; the first CI Linux run surfaced it). `flow.h`
+  now requests `_DEFAULT_SOURCE` before its own includes on Linux. If you include another
+  system header before `flow.h` in the implementation TU, request it yourself
+  (`-D_DEFAULT_SOURCE` or `-std=gnu11`) — see the README "Requirements & platform" note.
+
 ## [0.3.0] - 2026-06-19
 
 "Contributor-ready & documented." Adds continuous integration, a clean public/private
@@ -110,7 +122,8 @@ escapes; links `-lm`).
   requires a POSIX terminal (Linux / macOS). The model, geometry, rendering, routing,
   layout, and JSON layers are portable C99 and embeddable with the host's own I/O.
 
-[Unreleased]: https://github.com/dovas-net/cFlow/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dovas-net/cFlow/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/dovas-net/cFlow/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dovas-net/cFlow/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dovas-net/cFlow/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dovas-net/cFlow/releases/tag/v0.1.0

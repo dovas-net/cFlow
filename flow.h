@@ -52,9 +52,9 @@
  */
 #define FLOW_VERSION_MAJOR 0
 #define FLOW_VERSION_MINOR 3
-#define FLOW_VERSION_PATCH 0
+#define FLOW_VERSION_PATCH 1
 #define FLOW_VERSION (FLOW_VERSION_MAJOR * 10000 + FLOW_VERSION_MINOR * 100 + FLOW_VERSION_PATCH)
-#define FLOW_VERSION_STRING "0.3.0"
+#define FLOW_VERSION_STRING "0.3.1"
 /* Under strict -std=c11, glibc hides POSIX/BSD symbols the implementation needs
    (struct sigaction / sigaction / sigfillset, ioctl / struct winsize, poll) behind a
    feature-test macro. Request them BEFORE the first system header is pulled (the include
