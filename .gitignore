@@ -13,3 +13,5 @@ CLAUDE.local.md
 .claude/settings.local.json
 # internal release-readiness roadmap (candid; keep local)
 docs/RELEASE-READINESS.md
+# superpowers workflow artifacts (plans/handoffs/specs — internal process)
+docs/superpowers/

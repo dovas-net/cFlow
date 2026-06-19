@@ -1,16 +1,18 @@
 # flow
 
+[![CI](https://github.com/dovas-net/cFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/dovas-net/cFlow/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![single-header C99](https://img.shields.io/badge/single--header-C99-green.svg)
+[![release](https://img.shields.io/github/v/release/dovas-net/cFlow?sort=semver)](https://github.com/dovas-net/cFlow/releases)
 
 `flow` is a single-header C library for building interactive node-graph editors in the
 terminal — a C/terminal analog of [xyflow](https://github.com/xyflow/xyflow) (React Flow).
 Dependency-free: pure ANSI escapes, links only `-lm`.
 
-> Try it: `make && ./demos/topo` — a small network-topology editor (live pan, mouse
-> drag, zoom, minimap). `./demos/hello_flow` is the minimal showcase.
+![flow running in a terminal: web-server, cache, and database nodes joined by dashed orthogonal edges, with a keybinding header, a minimap-style devtools HUD reporting node/edge counts and undo depth, and a status bar of shortcuts.](docs/screenshot.png)
 
-<!-- TODO: embed a recorded GIF of ./demos/topo here once captured (vhs/asciinema). -->
+> Try it: `make && ./demos/topo` — a small network-topology editor (live pan, mouse
+> drag, zoom, minimap). `./demos/hello_flow` is the minimal showcase (shown above).
 
 ## Features
 
@@ -136,9 +138,17 @@ make            # regenerate flow.h and build the demos + examples
 make test       # run the headless test suite (39 suites, snapshot goldens)
 ```
 
-See [`docs/API.md`](docs/API.md) for the per-function API reference,
-`docs/superpowers/specs/2026-06-02-c-xyflow-flow-design.md` for the full design, and
-[`CHANGELOG.md`](CHANGELOG.md) for release history.
+## Documentation
+
+| Doc | What's in it |
+| --- | --- |
+| [`docs/API.md`](docs/API.md) | Per-function reference for every public symbol. |
+| [`docs/xyflow-mapping.md`](docs/xyflow-mapping.md) | Coming from React Flow? Concept-by-concept mapping to the `flow` API, and the terminal divergences. |
+| [`docs/theming.md`](docs/theming.md) | Color modes, the theme token struct, and the background grid. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How `flow.h` is generated, the module map, and the portable-core / POSIX boundary. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Build/test workflow, the amalgamation rule, and conventions. |
+| [`SECURITY.md`](SECURITY.md) | Security policy and the `flow_load` untrusted-input surface. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release history. |
 
 ## Credits
 

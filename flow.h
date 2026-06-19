@@ -2468,7 +2468,9 @@ typedef struct {
                                   ({0} must mean defaults, so 0 cannot mean "no gravity") */
   unsigned seed;               /* reserved for future jitter; the default path is RNG-free */
   flow_layered_dir dir;        /* LAYERED: FLOW_LR (default 0) or FLOW_TB */
-  int      gap_x, gap_y;       /* LAYERED: inter-node / inter-rank spacing in cells; <=0 -> 4 */
+  int      gap_x, gap_y;       /* LAYERED: spacing along the X / Y axis in cells; <=0 -> 4.
+                                  Axis-bound: the inter-node vs inter-rank role flips with dir
+                                  (LR -> gap_x=inter-rank, gap_y=inter-node; TB swaps). */
   int      fit_after;          /* nonzero -> flow_fit_view(f, margin) after committing */
   int      margin;
 } flow_layout_opts;
