@@ -51,10 +51,10 @@
  * reimplementation; no xyflow code is included.
  */
 #define FLOW_VERSION_MAJOR 0
-#define FLOW_VERSION_MINOR 2
+#define FLOW_VERSION_MINOR 3
 #define FLOW_VERSION_PATCH 0
 #define FLOW_VERSION (FLOW_VERSION_MAJOR * 10000 + FLOW_VERSION_MINOR * 100 + FLOW_VERSION_PATCH)
-#define FLOW_VERSION_STRING "0.2.0"
+#define FLOW_VERSION_STRING "0.3.0"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>

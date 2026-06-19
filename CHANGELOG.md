@@ -7,6 +7,38 @@ public API may change between minor versions; it will be locked at `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-19
+
+"Contributor-ready & documented." Adds continuous integration, a clean public/private
+header boundary, and a full documentation set. No breaking changes to the public C API.
+
+### Added
+- **Continuous integration.** `.github/workflows/ci.yml` runs five jobs: a build+test
+  matrix (`{ubuntu, gcc}`, `{ubuntu, clang}`, `{macos, clang}`) under `-Werror`; an
+  **amalgamation-drift gate** (`check-amalgamation`) that regenerates `flow.h` and
+  rejects a stale committed header; an ASan+UBSan sanitizer job; a `make cpp`
+  C++-consumption job; and an advisory `clang-tidy` lint job.
+- **Documentation set.** `docs/API.md` (per-function reference for all public symbols),
+  `docs/xyflow-mapping.md` (React Flow → flow concept map + terminal divergences),
+  `docs/theming.md` (color modes, theme tokens, backgrounds), `docs/ARCHITECTURE.md`
+  (amalgamation model, module map, portable-core/POSIX boundary), `CONTRIBUTING.md`, and
+  `SECURITY.md`. The README gains a screenshot, CI/release badges, and a documentation
+  index.
+
+### Changed
+- **Private internals no longer leak into the public header.** The seven `flow__*`
+  symbols (`flow__frames_armed`, `flow__undo_begin`/`_end`, and the undo
+  snapshot/op/cmd types) moved inside the `FLOW_IMPLEMENTATION` guard; a
+  declarations-only preprocess of `flow.h` now exposes zero `flow__` symbols.
+  `flow_cmd_kind` stays public.
+
+### Fixed
+- **Route out-of-memory hardening.** `flow_route_push` / `flow__addpt` no longer corrupt
+  the route buffer on a realloc-into-self failure; three arrowhead writers guard
+  `out->count > 0`. New `test_oom` route case.
+- Corrected the `flow_layout_opts` `gap_x` / `gap_y` doc comment: they are axis-bound
+  (X / Y), and the inter-node vs inter-rank role flips with `dir`.
+
 ## [0.2.0] - 2026-06-17
 
 "Embeddable & robust." Makes `flow` a well-behaved library to drop into a host
@@ -78,6 +110,7 @@ escapes; links `-lm`).
   requires a POSIX terminal (Linux / macOS). The model, geometry, rendering, routing,
   layout, and JSON layers are portable C99 and embeddable with the host's own I/O.
 
-[Unreleased]: https://github.com/dovas-net/cFlow/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dovas-net/cFlow/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dovas-net/cFlow/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dovas-net/cFlow/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dovas-net/cFlow/releases/tag/v0.1.0
