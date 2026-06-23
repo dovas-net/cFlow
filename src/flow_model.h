@@ -21,6 +21,10 @@ enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 
 #define FLOW_ZOOM_MAX      4.0f    /* default upper clamp */
 #define FLOW_ZOOM_STEP     1.2f    /* multiply/divide per zoom_in/out detent */
 #define FLOW_LOD_THRESHOLD 0.6f    /* below this, node renderers collapse to a marker */
+#define FLOW_COORD_MAX     (1 << 28) /* inc-9 #4: supported world-coordinate magnitude (268,435,456).
+   Deliberately well below INT_MAX so handle/route geometry (e.g. r.x + r.w/2 + along, wa.x - wr.x,
+   ox + world*zmax) can never overflow int. flow_load clamps node x/y and viewport ox/oy to
+   +/-FLOW_COORD_MAX; a value beyond it is a corrupt/hostile coordinate, not a real position. */
 typedef enum { FLOW_HANDLE_SOURCE, FLOW_HANDLE_TARGET, FLOW_HANDLE_BOTH } flow_handle_kind;
 typedef struct { char id[16]; flow_handle_kind kind; flow_pos pos; int along; } flow_handle; /* id must be a NUL-terminated C-string (matched by strcmp/strncmp, like node type[]/edge handle[]) */
 
@@ -970,10 +974,19 @@ int flow_edge_count(flow_t *f) { return f->nedges; }
 flow_node *flow_nodes(flow_t *f) { return f->nodes; }
 flow_edge *flow_edges(flow_t *f) { return f->edges; }
 flow_pt flow_node_abs(flow_t *f, const flow_node *n) {
-  flow_pt p = n->pos; int parent = n->parent, guard = 0;
+  /* inc-9 #4: accumulate parent offsets in a WIDER type and clamp the absolute result to
+     +/-FLOW_COORD_MAX. A hostile/deep nesting chain (up to the 1024 guard) of nodes at large
+     coords would otherwise overflow int mid-sum (UB) and feed wrapped positions into handle /
+     route / projection geometry (found by fuzz/fuzz_load.c). Real graphs are shallow with small
+     coords, so the sum stays well inside the bound and the result is byte-identical. The clamp
+     is the absolute-position half of FLOW_COORD_MAX's coordinate contract (per-node pos is bounded
+     on load); together they keep every downstream linear computation inside int. */
+  long long px = n->pos.x, py = n->pos.y; int parent = n->parent, guard = 0;
   while (parent != -1 && guard++ < 1024) { flow_node *pn = flow_get_node(f, parent); if (!pn) break;
-    p.x += pn->pos.x; p.y += pn->pos.y; parent = pn->parent; }
-  return p;
+    px += pn->pos.x; py += pn->pos.y; parent = pn->parent; }
+  if (px < -FLOW_COORD_MAX) px = -FLOW_COORD_MAX; else if (px > FLOW_COORD_MAX) px = FLOW_COORD_MAX;
+  if (py < -FLOW_COORD_MAX) py = -FLOW_COORD_MAX; else if (py > FLOW_COORD_MAX) py = FLOW_COORD_MAX;
+  flow_pt p = { (int)px, (int)py }; return p;
 }
 flow_rect flow_node_rect_abs(flow_t *f, const flow_node *n) { flow_pt a = flow_node_abs(f, n); flow_rect r = { a.x, a.y, n->w, n->h }; return r; }
 /* THE hidden choke points (inc-4 #11). All view-layer skip logic gates through these

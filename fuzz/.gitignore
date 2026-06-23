@@ -1,0 +1,7 @@
+# libFuzzer run artifacts (a finding is written to the cwd as crash-/oom-/timeout-<hash>).
+# The committed corpus is the curated seed set in corpus/; discoveries from `make fuzz`
+# go to /tmp/flow_fuzz_corpus (see the Makefile `fuzz` target), not here.
+/crash-*
+/oom-*
+/timeout-*
+/leak-*

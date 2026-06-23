@@ -27,6 +27,29 @@ public API may change between minor versions; it will be locked at `1.0.0`.
   ids are clamped instead of silently truncated (which could collide a huge id with an existing
   small one), and the post-load id counter saturates at `INT_MAX` instead of overflowing
   (previously undefined behaviour: `INT_MAX + 1` wrapped the next minted id negative).
+- **Edge rendering can no longer be driven into a CPU/OOM freeze by far-apart coordinates.**
+  An edge to a node at a large world coordinate (e.g. `x = 2e9`, reachable from a crafted file)
+  projected to a screen point billions of cells away; the orthogonal/straight routers then walked
+  that span cell-by-cell — billions of iterations and a multi-GB route allocation per edge per
+  frame. Each edge's projected endpoints are now clipped (Liang–Barsky, preserving the on-screen
+  trajectory) to an expanded viewport rect before routing, bounding the work to O(screen). On- and
+  near-screen edges are unaffected (byte-identical routes).
+- **A malformed JSON array no longer spins `flow_load` into an unbounded allocation.** The structural
+  validator counts `{}`/`[]` depth without matching bracket types, so a depth-balanced but
+  type-mismatched array (a `[` "closed" by `}`) passed validation and then stalled the array
+  iterator on the element it couldn't consume — looping `flow_add_node` until out-of-memory. The
+  iterator now stops when it can't make progress.
+- **Hostile coordinates can no longer overflow render geometry (signed-integer UB).** Loaded node
+  positions and viewport offsets are clamped to `±FLOW_COORD_MAX` (well below `INT_MAX`), and
+  `flow_node_abs` accumulates parent offsets in a wider type and clamps the absolute result — so a
+  near-`INT_MAX` coordinate or a deep parent chain can no longer overflow handle-anchor, routing, or
+  projection arithmetic. (All four hardening items above were found by the new fuzz harness.)
+
+### Added
+- **`fuzz/fuzz_load.c` — a libFuzzer harness over the untrusted `flow_load` + render path**, with a
+  seed corpus (`fuzz/corpus/`) and a `make fuzz` target (ASan + UBSan + libFuzzer; `-timeout`/`-rss`
+  flag any hang or memory blow-up). Apple clang lacks `-fsanitize=fuzzer`; pass
+  `FUZZ_CC=/opt/homebrew/opt/llvm/bin/clang`. Manual for now (not yet wired into CI).
 
 ## [0.3.1] - 2026-06-19
 

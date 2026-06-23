@@ -133,12 +133,45 @@ int flow_edge_endpoint_screen(flow_t *f, const flow_edge *e, int which, flow_pt 
   if (out) *out = which == 0 ? ss : ts;
   return 1;
 }
+/* inc-9 #3: clip an edge's projected screen endpoints to an EXPANDED viewport rect before
+   routing. A node at a hostile/large world coordinate (reachable via flow_load or flow_add_node)
+   projects to a screen point billions of cells away; flow_route_orthogonal/straight then walk
+   cell-by-cell across that span — billions of iterations + a multi-GB route realloc per edge per
+   frame (a CPU/OOM DoS), and (s.x+t.x)/2 / (t.x-s.x) overflow int on the way. Liang-Barsky clips
+   the segment ALONG the line (so the on-screen trajectory and slope are preserved — straight
+   edges keep their angle) to [-M, cols+M] x [-M, rows+M]. M is generous enough that any
+   on/near-screen edge is UNCHANGED — endpoints are rewritten ONLY when actually clipped (t0>0 /
+   t1<1), so every existing route stays byte-identical and snapshots don't move. Returns 0 when
+   the segment lies entirely outside the rect (cull: its cells would clip away anyway), else 1
+   with s/t clamped. Clip math is in double so the wide deltas never overflow; the clamped result
+   is bounded by the small rect, so the casts back to int are safe. Applied identically at every
+   route call site (hit-test / draw / toolbar) so render and hit-test can never drift. */
+static int flow__clip_route_ends(int cols, int rows, flow_pt *s, flow_pt *t) {
+  int M = (cols + rows) * 4 + 1024;
+  double xmin = -M, xmax = (double)cols + M, ymin = -M, ymax = (double)rows + M;
+  double x0 = s->x, y0 = s->y, dx = (double)t->x - s->x, dy = (double)t->y - s->y;
+  double t0 = 0.0, t1 = 1.0;
+  double p[4] = { -dx, dx, -dy, dy };
+  double q[4] = { x0 - xmin, xmax - x0, y0 - ymin, ymax - y0 };
+  for (int i = 0; i < 4; i++) {
+    if (p[i] == 0.0) { if (q[i] < 0.0) return 0; }           /* parallel to this boundary AND outside it */
+    else {
+      double r = q[i] / p[i];
+      if (p[i] < 0.0) { if (r > t1) return 0; if (r > t0) t0 = r; }   /* entering boundary */
+      else            { if (r < t0) return 0; if (r < t1) t1 = r; }   /* leaving  boundary */
+    }
+  }
+  if (t0 > 0.0) { s->x = (int)lround(x0 + t0 * dx); s->y = (int)lround(y0 + t0 * dy); }
+  if (t1 < 1.0) { t->x = (int)lround(x0 + t1 * dx); t->y = (int)lround(y0 + t1 * dy); }
+  return 1;
+}
 int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
   for (int i = flow_edge_count(f) - 1; i >= 0; i--) {         /* topmost first (reverse, like flow_hit_node) */
     flow_edge *e = &flow_edges(f)[i];
     if (!flow__edge_visible(f, e)) continue;                  /* hidden / cascaded: not hittable */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
+    if (!flow__clip_route_ends(f->cols, f->rows, &ss, &ts)) continue;  /* inc-9 #3: bound the route (DoS) */
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
     if (!et) et = &flow_default_edge_type;
     flow_route rt = {0};
@@ -263,6 +296,7 @@ static void flow__edge_toolbar(flow_t *f, flow_cellbuf *cb) {
   if (!e || !flow__edge_visible(f, e)) return;
   flow_pt ss, ts; flow_pos sp, tp;
   if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) return;
+  if (!flow__clip_route_ends(cb->w, cb->h, &ss, &ts)) return;         /* inc-9 #3: bound the route to the RENDER TARGET (DoS) */
   const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
   if (!et) et = &flow_default_edge_type;
   flow_route rt = {0};
@@ -321,6 +355,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     if (!flow__edge_visible(f, e)) continue;   /* hidden edge OR hidden endpoint (cascade) */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
+    if (!flow__clip_route_ends(cb.w, cb.h, &ss, &ts)) continue;       /* inc-9 #3: bound the route to the RENDER TARGET (cols x rows, which may exceed f->cols/rows) so a far-but-in-buffer edge isn't clipped to the stale engine viewport (DoS) */
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
     if (!et) et = &flow_default_edge_type;
     flow_route rt = {0};

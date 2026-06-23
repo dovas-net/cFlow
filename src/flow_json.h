@@ -264,6 +264,11 @@ static int flow__json_iter(flow_json_rd *arr, const char **elem, int *len) {
   if (p >= arr->end || *p == ']') { arr->p = p; return 0; }
   const char *s = p;
   flow__json_skip(&p, arr->end);
+  if (p == s) { arr->p = arr->end; return 0; }      /* inc-9 #4: skip made NO progress (e.g. a '}'
+     where an element was expected — depth-balanced but type-mismatched, so it slipped past
+     flow__json_valid, which counts {} and [] depth together). An iterator that can't consume the
+     element must STOP, not yield it forever: otherwise the nodes/edges loop spins flow_add_node
+     into an OOM (found by fuzz/fuzz_load.c). */
   *elem = s; *len = (int)(p - s);
   arr->p = p;                                       /* leave cursor after this element */
   return 1;
@@ -277,7 +282,12 @@ static int flow__json_iter(flow_json_rd *arr, const char **elem, int *len) {
 static int flow__json_valid(const char *p, const char *end) {
   flow__json_ws(&p, end);
   if (p >= end || *p != '{') return 0;
-  int depth = 0;
+  char stack[1024]; int depth = 0;                  /* inc-9 #4: TYPE-matched nesting, not a bare depth
+     count: a '[' must close with ']' and '{' with '}'. A depth-only counter accepted a
+     type-mismatched-but-balanced doc like {"nodes":[}}, which then stalled flow__json_iter into an
+     unbounded flow_add_node (OOM) AFTER flow__graph_reset had already wiped the live graph — turning
+     a corrupt file into a "successful" empty load. Rejecting it HERE (before the reset) restores the
+     contract below: malformed => -1, graph UNTOUCHED. The 1024 cap also rejects pathological nesting. */
   while (p < end) {
     char c = *p;
     if (c == '"') {
@@ -286,8 +296,12 @@ static int flow__json_valid(const char *p, const char *end) {
       if (p >= end) return 0;                       /* unterminated string */
       p++; continue;
     }
-    if (c == '{' || c == '[') depth++;
-    else if (c == '}' || c == ']') { if (--depth < 0) return 0; }
+    if (c == '{' || c == '[') {
+      if (depth >= (int)sizeof stack) return 0;      /* nesting too deep */
+      stack[depth++] = (c == '{') ? '}' : ']';
+    } else if (c == '}' || c == ']') {
+      if (depth == 0 || stack[--depth] != c) return 0;  /* unbalanced OR type-mismatched closer */
+    }
     p++;
   }
   return depth == 0;
@@ -341,6 +355,8 @@ int flow_load(flow_t *f, const char *path) {
        [zmin,zmax] range here. A normally-saved file (finite, in-range) is byte-identical through this. */
     if (!isfinite(ox)) ox = 0.0f;
     if (!isfinite(oy)) oy = 0.0f;
+    if (ox < -(float)FLOW_COORD_MAX) ox = -(float)FLOW_COORD_MAX; else if (ox > (float)FLOW_COORD_MAX) ox = (float)FLOW_COORD_MAX;  /* inc-9 #4: bound */
+    if (oy < -(float)FLOW_COORD_MAX) oy = -(float)FLOW_COORD_MAX; else if (oy > (float)FLOW_COORD_MAX) oy = (float)FLOW_COORD_MAX;  /* offset so projection (int)lround can't overflow */
     if (!isfinite(zoom) || zoom <= 0.0f) zoom = 1.0f;
     if (zoom < f->zmin) zoom = f->zmin;
     if (zoom > f->zmax) zoom = f->zmax;
@@ -363,6 +379,8 @@ int flow_load(flow_t *f, const char *path) {
       if (flow__json_find(elem, eend, "x", &fld))      flow__json_int(fld, &x);
       if (flow__json_find(elem, eend, "y", &fld))      flow__json_int(fld, &y);
       if (flow__json_find(elem, eend, "parent", &fld)) flow__json_int(fld, &parent);
+      if (x < -FLOW_COORD_MAX) x = -FLOW_COORD_MAX; else if (x > FLOW_COORD_MAX) x = FLOW_COORD_MAX;  /* inc-9 #4: bound */
+      if (y < -FLOW_COORD_MAX) y = -FLOW_COORD_MAX; else if (y > FLOW_COORD_MAX) y = FLOW_COORD_MAX;  /* coords so handle/route geometry can't overflow int (UBSan) */
       flow_add_node(f, type, (flow_pt){ x, y }, NULL);
       flow_node *n = &f->nodes[f->nnodes - 1];       /* just-appended (index, not id-search:
         we overwrite n->id below, so flow_get_node on the transient id could alias an

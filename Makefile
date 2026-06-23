@@ -2,7 +2,7 @@ CC=cc
 CXX=c++
 CFLAGS=-std=c11 -O2 -Wall -Wextra
 LIBS=-lm
-TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input test_mouse test_select test_marquee test_keys test_connect test_edge test_zoom test_json test_groups test_events test_space_pan test_autopan test_undo test_layout test_flowchart test_extents test_viewport_events test_query test_focus test_clipboard test_helper test_culling test_search test_clock test_animated test_gates test_explicit_size test_node_resizer test_cancel_gesture test_embed test_term test_alloc test_oom
+TESTS=test_smoke test_geom test_cell test_model test_route test_render test_input test_mouse test_select test_marquee test_keys test_connect test_edge test_zoom test_json test_groups test_events test_space_pan test_autopan test_undo test_layout test_flowchart test_extents test_viewport_events test_query test_focus test_clipboard test_helper test_culling test_search test_clock test_animated test_gates test_explicit_size test_node_resizer test_cancel_gesture test_route_clip test_embed test_term test_alloc test_oom
 
 all: flow.h demos examples
 
@@ -36,6 +36,20 @@ cpp: flow.h
 	$(CC)  $(CFLAGS) -c tests/cpp_link_impl.c -o /tmp/flow_link_impl.o
 	$(CXX) -std=c++17 -Wall -Wextra tests/cpp_link_main.cpp /tmp/flow_link_impl.o -o /tmp/flow_cpp_link $(LIBS) && /tmp/flow_cpp_link && echo "cpp_link: C flow.o links against a C++ caller (extern \"C\") OK"
 
+# libFuzzer harness over the untrusted flow_load + render path (the only attacker-reachable
+# bytes). NOT in `test` — needs clang with -fsanitize=fuzzer; Apple clang lacks it, so on macOS
+# pass FUZZ_CC=/opt/homebrew/opt/llvm/bin/clang. -timeout/-rss flag any hang or memory blow-up.
+#   make fuzz                                   # 30s smoke over fuzz/corpus
+#   make fuzz FUZZ_TIME=300                       # longer campaign
+#   make fuzz FUZZ_CC=/opt/homebrew/opt/llvm/bin/clang
+FUZZ_CC   ?= clang
+FUZZ_TIME ?= 30
+fuzz: flow.h
+	$(FUZZ_CC) -std=c11 -g -O1 -fsanitize=address,undefined,fuzzer -fno-sanitize-recover=all fuzz/fuzz_load.c -o /tmp/flow_fuzz_load $(LIBS)
+	@mkdir -p /tmp/flow_fuzz_corpus
+	/tmp/flow_fuzz_load -max_total_time=$(FUZZ_TIME) -rss_limit_mb=2048 -timeout=10 -artifact_prefix=/tmp/flow_fuzz_ /tmp/flow_fuzz_corpus fuzz/corpus
+	@echo "(discoveries written to /tmp/flow_fuzz_corpus; committed seeds in fuzz/corpus stay clean)"
+
 clean:
 	rm -f demos/hello_flow demos/topo demos/flowchart examples/embed_headless $(addprefix tests/,$(TESTS)) flow.h
-.PHONY: all demos examples test cpp clean
+.PHONY: all demos examples test cpp fuzz clean

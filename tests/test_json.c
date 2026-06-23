@@ -546,6 +546,66 @@ int main(void) {
     ASSERT_INT(ib->nextid, INT_MAX, "nextid saturated at INT_MAX (no INT_MAX+1 overflow)");
     flow_free(ib);
 
+    /* (c) a depth-balanced-but-TYPE-mismatched array ('[' "closed" by '}') passes the structural
+       validator (which counts {} and [] depth together) but then landed flow__json_iter on a '}'
+       where flow__json_skip can't advance -> the cursor stalled -> infinite flow_add_node -> OOM
+       (found by the libFuzzer harness, fuzz/fuzz_load.c). The iterator must make progress or stop;
+       load must RETURN with a bounded node count, not spin. */
+    hf = fopen(P_HARD, "wb");
+    fputs("{\"nodes\":[}}", hf);                  /* { nodes:[ } }  => {/[/} depth-balanced but TYPE-mismatched */
+    fclose(hf);
+    flow_t *it = flow_new(80, 24); flow_register_defaults(it);
+    flow_add_node(it, "default", (flow_pt){5, 5}, (void*)"keep");   /* a live graph the load must not corrupt */
+    ASSERT_INT(flow_load(it, P_HARD), -1, "type-mismatched-bracket file is rejected (-1), not a silent empty load");
+    ASSERT_INT(flow_node_count(it), 1, "rejected load leaves the live graph UNTOUCHED (no spin, no wipe)");
+    flow_free(it);
+
+    /* (d) a node at a near-INT_MAX coordinate overflowed handle-anchor geometry during render
+       (r.x + r.w/2 + along, etc. -> signed-overflow UB; PR-#1's id/coord clamp to INT_MAX actually
+       set up the perfect "+small" overflow). Found by the libFuzzer harness under UBSan. Coordinates
+       are now clamped to +/-FLOW_COORD_MAX (well below INT_MAX) on load, so all render geometry stays
+       in int range. This case trips UBSan in the sanitizer gate pre-fix. */
+    hf = fopen(P_HARD, "wb");
+    fputs("{\"nodes\":[{\"id\":1,\"type\":\"default\",\"x\":10,\"y\":10},"
+          "{\"id\":2,\"type\":\"default\",\"x\":2147483647,\"y\":2147483647}],"
+          "\"edges\":[{\"id\":1,\"source\":1,\"target\":2,\"sourceHandle\":\"out\",\"targetHandle\":\"in\"}]}", hf);
+    fclose(hf);
+    flow_t *co = flow_new(80, 24); flow_register_defaults(co);
+    ASSERT_INT(flow_load(co, P_HARD), 0, "load near-INT_MAX coords succeeds");
+    ASSERT_INT(flow_node_count(co), 2, "both nodes loaded");
+    ASSERT(co->nodes[1].pos.x <= FLOW_COORD_MAX && co->nodes[1].pos.x >= -FLOW_COORD_MAX, "huge x clamped to +/-FLOW_COORD_MAX");
+    ASSERT(co->nodes[1].pos.y <= FLOW_COORD_MAX && co->nodes[1].pos.y >= -FLOW_COORD_MAX, "huge y clamped to +/-FLOW_COORD_MAX");
+    flow_cell *cbuf = (flow_cell*)calloc((size_t)80 * 24, sizeof(flow_cell));
+    flow_render(co, cbuf, 80, 24);                /* exercises handle-anchor geometry; must be UB-free */
+    ASSERT(cbuf != NULL, "render of clamped extreme-coord graph completes (no overflow UB)");
+    free(cbuf); flow_free(co);
+
+    /* (e) a hostile DEEP PARENT CHAIN: 16 nodes each at x=y=FLOW_COORD_MAX, nested. flow_node_abs
+       sums parent offsets up the chain; in plain int that overflows at depth 8 (8 * 2^28 = 2^31 -> UB)
+       and feeds wrapped positions into render geometry. The wide accumulation + clamp keep abs bounded.
+       This is the deterministic, sanitizer-gated regression for the accumulation fix — case (d) is flat
+       and never walks a chain. (Loaded with parent ids, faithful to the libFuzzer finding.) */
+    {
+      char js[2048]; int jp = 0;
+      jp += snprintf(js + jp, sizeof js - jp, "{\"nodes\":[");
+      for (int i = 0; i < 16; i++)
+        jp += snprintf(js + jp, sizeof js - jp,
+                       "%s{\"id\":%d,\"type\":\"default\",\"x\":%d,\"y\":%d,\"parent\":%d}",
+                       i ? "," : "", i + 1, FLOW_COORD_MAX, FLOW_COORD_MAX, i == 0 ? -1 : i);
+      jp += snprintf(js + jp, sizeof js - jp, "],\"edges\":[]}");
+      hf = fopen(P_HARD, "wb"); fputs(js, hf); fclose(hf);
+      flow_t *ch = flow_new(80, 24); flow_register_defaults(ch);
+      ASSERT_INT(flow_load(ch, P_HARD), 0, "load deep parent chain succeeds");
+      ASSERT_INT(flow_node_count(ch), 16, "all 16 chained nodes loaded");
+      flow_pt cabs = flow_node_abs(ch, &ch->nodes[15]);   /* deepest: sum of 16 * 2^28 -> int overflow pre-fix */
+      ASSERT(cabs.x <= FLOW_COORD_MAX && cabs.x >= -FLOW_COORD_MAX, "deep-chain abs.x clamped (no accumulation overflow)");
+      ASSERT(cabs.y <= FLOW_COORD_MAX && cabs.y >= -FLOW_COORD_MAX, "deep-chain abs.y clamped (no accumulation overflow)");
+      flow_cell *chb = (flow_cell*)calloc((size_t)80 * 24, sizeof(flow_cell));
+      flow_render(ch, chb, 80, 24);                       /* renders every node -> flow_node_abs walks the chain */
+      ASSERT(chb != NULL, "render of deep-chain graph completes (no accumulation UB)");
+      free(chb); flow_free(ch);
+    }
+
     remove(P_HARD);
   }
 

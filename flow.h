@@ -309,6 +309,10 @@ enum { FLOW_SELECTED = 1u, FLOW_DRAGGING = 2u, FLOW_HOVERED = 4u, FLOW_HIDDEN = 
 #define FLOW_ZOOM_MAX      4.0f    /* default upper clamp */
 #define FLOW_ZOOM_STEP     1.2f    /* multiply/divide per zoom_in/out detent */
 #define FLOW_LOD_THRESHOLD 0.6f    /* below this, node renderers collapse to a marker */
+#define FLOW_COORD_MAX     (1 << 28) /* inc-9 #4: supported world-coordinate magnitude (268,435,456).
+   Deliberately well below INT_MAX so handle/route geometry (e.g. r.x + r.w/2 + along, wa.x - wr.x,
+   ox + world*zmax) can never overflow int. flow_load clamps node x/y and viewport ox/oy to
+   +/-FLOW_COORD_MAX; a value beyond it is a corrupt/hostile coordinate, not a real position. */
 typedef enum { FLOW_HANDLE_SOURCE, FLOW_HANDLE_TARGET, FLOW_HANDLE_BOTH } flow_handle_kind;
 typedef struct { char id[16]; flow_handle_kind kind; flow_pos pos; int along; } flow_handle; /* id must be a NUL-terminated C-string (matched by strcmp/strncmp, like node type[]/edge handle[]) */
 
@@ -1258,10 +1262,19 @@ int flow_edge_count(flow_t *f) { return f->nedges; }
 flow_node *flow_nodes(flow_t *f) { return f->nodes; }
 flow_edge *flow_edges(flow_t *f) { return f->edges; }
 flow_pt flow_node_abs(flow_t *f, const flow_node *n) {
-  flow_pt p = n->pos; int parent = n->parent, guard = 0;
+  /* inc-9 #4: accumulate parent offsets in a WIDER type and clamp the absolute result to
+     +/-FLOW_COORD_MAX. A hostile/deep nesting chain (up to the 1024 guard) of nodes at large
+     coords would otherwise overflow int mid-sum (UB) and feed wrapped positions into handle /
+     route / projection geometry (found by fuzz/fuzz_load.c). Real graphs are shallow with small
+     coords, so the sum stays well inside the bound and the result is byte-identical. The clamp
+     is the absolute-position half of FLOW_COORD_MAX's coordinate contract (per-node pos is bounded
+     on load); together they keep every downstream linear computation inside int. */
+  long long px = n->pos.x, py = n->pos.y; int parent = n->parent, guard = 0;
   while (parent != -1 && guard++ < 1024) { flow_node *pn = flow_get_node(f, parent); if (!pn) break;
-    p.x += pn->pos.x; p.y += pn->pos.y; parent = pn->parent; }
-  return p;
+    px += pn->pos.x; py += pn->pos.y; parent = pn->parent; }
+  if (px < -FLOW_COORD_MAX) px = -FLOW_COORD_MAX; else if (px > FLOW_COORD_MAX) px = FLOW_COORD_MAX;
+  if (py < -FLOW_COORD_MAX) py = -FLOW_COORD_MAX; else if (py > FLOW_COORD_MAX) py = FLOW_COORD_MAX;
+  flow_pt p = { (int)px, (int)py }; return p;
 }
 flow_rect flow_node_rect_abs(flow_t *f, const flow_node *n) { flow_pt a = flow_node_abs(f, n); flow_rect r = { a.x, a.y, n->w, n->h }; return r; }
 /* THE hidden choke points (inc-4 #11). All view-layer skip logic gates through these
@@ -3097,12 +3110,45 @@ int flow_edge_endpoint_screen(flow_t *f, const flow_edge *e, int which, flow_pt 
   if (out) *out = which == 0 ? ss : ts;
   return 1;
 }
+/* inc-9 #3: clip an edge's projected screen endpoints to an EXPANDED viewport rect before
+   routing. A node at a hostile/large world coordinate (reachable via flow_load or flow_add_node)
+   projects to a screen point billions of cells away; flow_route_orthogonal/straight then walk
+   cell-by-cell across that span — billions of iterations + a multi-GB route realloc per edge per
+   frame (a CPU/OOM DoS), and (s.x+t.x)/2 / (t.x-s.x) overflow int on the way. Liang-Barsky clips
+   the segment ALONG the line (so the on-screen trajectory and slope are preserved — straight
+   edges keep their angle) to [-M, cols+M] x [-M, rows+M]. M is generous enough that any
+   on/near-screen edge is UNCHANGED — endpoints are rewritten ONLY when actually clipped (t0>0 /
+   t1<1), so every existing route stays byte-identical and snapshots don't move. Returns 0 when
+   the segment lies entirely outside the rect (cull: its cells would clip away anyway), else 1
+   with s/t clamped. Clip math is in double so the wide deltas never overflow; the clamped result
+   is bounded by the small rect, so the casts back to int are safe. Applied identically at every
+   route call site (hit-test / draw / toolbar) so render and hit-test can never drift. */
+static int flow__clip_route_ends(int cols, int rows, flow_pt *s, flow_pt *t) {
+  int M = (cols + rows) * 4 + 1024;
+  double xmin = -M, xmax = (double)cols + M, ymin = -M, ymax = (double)rows + M;
+  double x0 = s->x, y0 = s->y, dx = (double)t->x - s->x, dy = (double)t->y - s->y;
+  double t0 = 0.0, t1 = 1.0;
+  double p[4] = { -dx, dx, -dy, dy };
+  double q[4] = { x0 - xmin, xmax - x0, y0 - ymin, ymax - y0 };
+  for (int i = 0; i < 4; i++) {
+    if (p[i] == 0.0) { if (q[i] < 0.0) return 0; }           /* parallel to this boundary AND outside it */
+    else {
+      double r = q[i] / p[i];
+      if (p[i] < 0.0) { if (r > t1) return 0; if (r > t0) t0 = r; }   /* entering boundary */
+      else            { if (r < t0) return 0; if (r < t1) t1 = r; }   /* leaving  boundary */
+    }
+  }
+  if (t0 > 0.0) { s->x = (int)lround(x0 + t0 * dx); s->y = (int)lround(y0 + t0 * dy); }
+  if (t1 < 1.0) { t->x = (int)lround(x0 + t1 * dx); t->y = (int)lround(y0 + t1 * dy); }
+  return 1;
+}
 int flow_hit_edge(flow_t *f, flow_pt screen, int tol) {
   for (int i = flow_edge_count(f) - 1; i >= 0; i--) {         /* topmost first (reverse, like flow_hit_node) */
     flow_edge *e = &flow_edges(f)[i];
     if (!flow__edge_visible(f, e)) continue;                  /* hidden / cascaded: not hittable */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
+    if (!flow__clip_route_ends(f->cols, f->rows, &ss, &ts)) continue;  /* inc-9 #3: bound the route (DoS) */
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
     if (!et) et = &flow_default_edge_type;
     flow_route rt = {0};
@@ -3227,6 +3273,7 @@ static void flow__edge_toolbar(flow_t *f, flow_cellbuf *cb) {
   if (!e || !flow__edge_visible(f, e)) return;
   flow_pt ss, ts; flow_pos sp, tp;
   if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) return;
+  if (!flow__clip_route_ends(cb->w, cb->h, &ss, &ts)) return;         /* inc-9 #3: bound the route to the RENDER TARGET (DoS) */
   const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
   if (!et) et = &flow_default_edge_type;
   flow_route rt = {0};
@@ -3285,6 +3332,7 @@ void flow_render(flow_t *f, flow_cell *out, int cols, int rows) {
     if (!flow__edge_visible(f, e)) continue;   /* hidden edge OR hidden endpoint (cascade) */
     flow_pt ss, ts; flow_pos sp, tp;
     if (!flow__edge_screen_ends(f, e, &ss, &sp, &ts, &tp)) continue;
+    if (!flow__clip_route_ends(cb.w, cb.h, &ss, &ts)) continue;       /* inc-9 #3: bound the route to the RENDER TARGET (cols x rows, which may exceed f->cols/rows) so a far-but-in-buffer edge isn't clipped to the stale engine viewport (DoS) */
     const flow_edge_type *et = flow_edge_type_for(f, e->type[0] ? e->type : "default");
     if (!et) et = &flow_default_edge_type;
     flow_route rt = {0};
@@ -3730,6 +3778,11 @@ static int flow__json_iter(flow_json_rd *arr, const char **elem, int *len) {
   if (p >= arr->end || *p == ']') { arr->p = p; return 0; }
   const char *s = p;
   flow__json_skip(&p, arr->end);
+  if (p == s) { arr->p = arr->end; return 0; }      /* inc-9 #4: skip made NO progress (e.g. a '}'
+     where an element was expected — depth-balanced but type-mismatched, so it slipped past
+     flow__json_valid, which counts {} and [] depth together). An iterator that can't consume the
+     element must STOP, not yield it forever: otherwise the nodes/edges loop spins flow_add_node
+     into an OOM (found by fuzz/fuzz_load.c). */
   *elem = s; *len = (int)(p - s);
   arr->p = p;                                       /* leave cursor after this element */
   return 1;
@@ -3743,7 +3796,12 @@ static int flow__json_iter(flow_json_rd *arr, const char **elem, int *len) {
 static int flow__json_valid(const char *p, const char *end) {
   flow__json_ws(&p, end);
   if (p >= end || *p != '{') return 0;
-  int depth = 0;
+  char stack[1024]; int depth = 0;                  /* inc-9 #4: TYPE-matched nesting, not a bare depth
+     count: a '[' must close with ']' and '{' with '}'. A depth-only counter accepted a
+     type-mismatched-but-balanced doc like {"nodes":[}}, which then stalled flow__json_iter into an
+     unbounded flow_add_node (OOM) AFTER flow__graph_reset had already wiped the live graph — turning
+     a corrupt file into a "successful" empty load. Rejecting it HERE (before the reset) restores the
+     contract below: malformed => -1, graph UNTOUCHED. The 1024 cap also rejects pathological nesting. */
   while (p < end) {
     char c = *p;
     if (c == '"') {
@@ -3752,8 +3810,12 @@ static int flow__json_valid(const char *p, const char *end) {
       if (p >= end) return 0;                       /* unterminated string */
       p++; continue;
     }
-    if (c == '{' || c == '[') depth++;
-    else if (c == '}' || c == ']') { if (--depth < 0) return 0; }
+    if (c == '{' || c == '[') {
+      if (depth >= (int)sizeof stack) return 0;      /* nesting too deep */
+      stack[depth++] = (c == '{') ? '}' : ']';
+    } else if (c == '}' || c == ']') {
+      if (depth == 0 || stack[--depth] != c) return 0;  /* unbalanced OR type-mismatched closer */
+    }
     p++;
   }
   return depth == 0;
@@ -3807,6 +3869,8 @@ int flow_load(flow_t *f, const char *path) {
        [zmin,zmax] range here. A normally-saved file (finite, in-range) is byte-identical through this. */
     if (!isfinite(ox)) ox = 0.0f;
     if (!isfinite(oy)) oy = 0.0f;
+    if (ox < -(float)FLOW_COORD_MAX) ox = -(float)FLOW_COORD_MAX; else if (ox > (float)FLOW_COORD_MAX) ox = (float)FLOW_COORD_MAX;  /* inc-9 #4: bound */
+    if (oy < -(float)FLOW_COORD_MAX) oy = -(float)FLOW_COORD_MAX; else if (oy > (float)FLOW_COORD_MAX) oy = (float)FLOW_COORD_MAX;  /* offset so projection (int)lround can't overflow */
     if (!isfinite(zoom) || zoom <= 0.0f) zoom = 1.0f;
     if (zoom < f->zmin) zoom = f->zmin;
     if (zoom > f->zmax) zoom = f->zmax;
@@ -3829,6 +3893,8 @@ int flow_load(flow_t *f, const char *path) {
       if (flow__json_find(elem, eend, "x", &fld))      flow__json_int(fld, &x);
       if (flow__json_find(elem, eend, "y", &fld))      flow__json_int(fld, &y);
       if (flow__json_find(elem, eend, "parent", &fld)) flow__json_int(fld, &parent);
+      if (x < -FLOW_COORD_MAX) x = -FLOW_COORD_MAX; else if (x > FLOW_COORD_MAX) x = FLOW_COORD_MAX;  /* inc-9 #4: bound */
+      if (y < -FLOW_COORD_MAX) y = -FLOW_COORD_MAX; else if (y > FLOW_COORD_MAX) y = FLOW_COORD_MAX;  /* coords so handle/route geometry can't overflow int (UBSan) */
       flow_add_node(f, type, (flow_pt){ x, y }, NULL);
       flow_node *n = &f->nodes[f->nnodes - 1];       /* just-appended (index, not id-search:
         we overwrite n->id below, so flow_get_node on the transient id could alias an
