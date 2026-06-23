@@ -67,6 +67,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 /* Allocator + assert hooks (stb convention). To route flow's heap through your own
    arena/tracker, #define ALL FOUR of FLOW_MALLOC/CALLOC/REALLOC/FREE before including
    flow.h (override the set together — they must pair). Buffers flow returns to you

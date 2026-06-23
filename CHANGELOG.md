@@ -7,6 +7,27 @@ public API may change between minor versions; it will be locked at `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- **A lone `Esc` while a pointer gesture is in flight no longer strands the gesture or
+  silently kills undo/redo.** The `Esc` handler tore down the in-flight connection,
+  selection and focus but left an armed node-resize / node-drag / edge-reconnect — and its
+  open undo transaction — behind. On the keyboard-only path the transaction never reclosed,
+  so `flow_undo`/`flow_redo` became permanent no-ops (the `txn_depth > 0` guard), and the
+  next mouse release acted on the stranded gesture (e.g. a reconnect repointing the edge onto
+  whatever lay under the cursor). `Esc` now cancels any in-flight gesture: it closes the undo
+  bracket (committing what was recorded as a single step, so the change is undoable as usual)
+  and resets the gesture state, leaving the trailing release an inert no-op.
+
+### Security
+- **`flow_load` rejects hostile/corrupt numeric input that could hang or destabilise a host.**
+  The viewport restore bypassed the zoom clamp, so a file with `NaN`/`Inf`/`0`/negative or
+  out-of-range `zoom` (or non-finite `ox`/`oy`) was stored verbatim and then propagated into
+  the render and world↔screen math; non-finite and non-positive values are now sanitised and
+  zoom is clamped into the engine's `[zmin, zmax]` range on load. Out-of-`int`-range node/edge
+  ids are clamped instead of silently truncated (which could collide a huge id with an existing
+  small one), and the post-load id counter saturates at `INT_MAX` instead of overflowing
+  (previously undefined behaviour: `INT_MAX + 1` wrapped the next minted id negative).
+
 ## [0.3.1] - 2026-06-19
 
 ### Fixed

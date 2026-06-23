@@ -86,7 +86,7 @@ void flow_feed(flow_t *f, const char *b, int n) {
        is theoretical); the alternative — requiring a next byte to prove loneness —
        would break the COMMON case, a tapped ESC arriving as a 1-byte read. A real
        fix is an ESC-timeout state machine; out of scope for v1. */
-    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); f->space_held = 0; flow_clear_selection(f); f->focus_node = -1; i++; continue; }
+    if (b[i] == '\x1b' && (i + 1 >= n || b[i+1] != '[')) { flow_cancel_connection(f); flow__cancel_gesture(f); f->space_held = 0; flow_clear_selection(f); f->focus_node = -1; i++; continue; }
     i++;
   }
 }

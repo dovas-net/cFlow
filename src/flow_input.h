@@ -537,6 +537,27 @@ void flow_handle_mouse(flow_t *f, const flow_mouse_event *ev) {
     f->helper.nvert = 0; f->helper.nhorz = 0;    /* guides never outlive the gesture (inc-5 #8) */
   }
 }
+/* inc-9 #1: cancel any in-flight POINTER gesture (resize / node-drag / edge-reconnect),
+   closing the undo bracket it opened at arm time and resetting all transient gesture state.
+   COMMIT-WHAT'S-DONE: flow__undo_end commits whatever the gesture recorded as ONE undo step
+   (an empty gesture recorded nothing => no step), so undo/redo are LIVE again and the trailing
+   mouse release is an inert no-op. Idempotent: a no-op — and crucially NO stray flow__undo_end
+   (which would underflow txn_depth) — when nothing is armed. The three gestures are mutually
+   exclusive (each arm clears the others / returns early), so at most one bracket is open and a
+   single flow__undo_end closes it. Connections are NOT touched here: flow_cancel_connection owns
+   that teardown (it fires on_connect_end) — the lone-ESC handler (flow_run.h) calls both. The
+   reset field set is the UNION of the three release-path disarms (resize :456 / reconnect :448 /
+   drag :534). */
+static void flow__cancel_gesture(flow_t *f) {
+  if (f->resize_node != -1 || f->reconnect_edge != -1 || f->drag_node != -1)
+    flow__undo_end(f);                             /* close the one open arm-time bracket */
+  f->resize_node = -1; f->resize_corner = -1;
+  f->reconnect_edge = -1;
+  f->drag_node = -1; f->down_node = -1; f->dragging_pan = 0;
+  f->mouse_down = 0; f->moved = 0; f->down_modsel = 0;
+  f->marquee_active = 0; f->marquee_on = 0;
+  f->helper.nvert = 0; f->helper.nhorz = 0;
+}
 /* inc-6 #8: an autopan-eligible object drag/connection is in flight (the four MOTION
    branches that call flow__autopan). Drives BOTH the tick gate below and #4's
    flow__frames_armed clause; pane-pan/space-pan (dragging_pan) are excluded by omission,

@@ -170,6 +170,11 @@ static int flow__json_int(flow_json_rd r, int *v) {
   if (p >= r.end) return 0;
   char *e = NULL; long l = strtol(p, &e, 10);
   if (e == p) return 0;
+  if (l > INT_MAX) l = INT_MAX;                     /* inc-9 #2: CLAMP out-of-int-range ids/coords rather
+     than (int)-truncating them — a huge id would silently narrow to a small COLLIDING id, and an id of
+     exactly INT_MAX overflows the post-load `nextid = maxnid + 1` (signed-overflow UB). On 32-bit `long`
+     strtol already saturates to LONG_MAX==INT_MAX on overflow, so this stays correct everywhere. */
+  else if (l < INT_MIN) l = INT_MIN;
   *v = (int)l; return 1;
 }
 
@@ -329,6 +334,16 @@ int flow_load(flow_t *f, const char *path) {
     if (flow__json_find(vp.p, vp.end, "ox", &field))   flow__json_float(field, &ox);
     if (flow__json_find(vp.p, vp.end, "oy", &field))   flow__json_float(field, &oy);
     if (flow__json_find(vp.p, vp.end, "zoom", &field)) flow__json_float(field, &zoom);
+    /* inc-9 #2: load restores the view via flow__view_set DIRECTLY, which clamps offset only and
+       NOT zoom (flow_set_zoom's [zmin,zmax] clamp is bypassed). A hostile/corrupt file could thus
+       store NaN/Inf/0/negative/out-of-range zoom that then poisons world<->screen and (int)lroundf
+       render math. Sanitize non-finite/non-positive to a safe default and clamp zoom into the live
+       [zmin,zmax] range here. A normally-saved file (finite, in-range) is byte-identical through this. */
+    if (!isfinite(ox)) ox = 0.0f;
+    if (!isfinite(oy)) oy = 0.0f;
+    if (!isfinite(zoom) || zoom <= 0.0f) zoom = 1.0f;
+    if (zoom < f->zmin) zoom = f->zmin;
+    if (zoom > f->zmax) zoom = f->zmax;
     flow__view_set(f, ox, oy, zoom);   /* restore-on-load fires on_viewport_change (graph is mid-rebuild: callback must not query nodes) */
   }
 
@@ -422,8 +437,9 @@ int flow_load(flow_t *f, const char *path) {
     }
   }
 
-  f->nextid  = maxnid + 1;                           /* post-load adds don't collide */
-  f->nexteid = maxeid + 1;
+  f->nextid  = maxnid >= INT_MAX ? INT_MAX : maxnid + 1;  /* inc-9 #2: SATURATE — a loaded id of INT_MAX
+     would make maxnid+1 a signed-overflow (UB) wrapping nextid to INT_MIN (negative ids next add) */
+  f->nexteid = maxeid >= INT_MAX ? INT_MAX : maxeid + 1;
 
   f->validator_fn = saved_vfn; f->validator_user = saved_vuser;
   f->journal.suppress--;

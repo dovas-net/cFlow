@@ -1,6 +1,8 @@
 #define FLOW_IMPLEMENTATION
 #include "../flow.h"
 #include "flowtest.h"
+#include <limits.h>
+#include <math.h>
 
 /* ---- a 'device' node type mirroring topo's 5-field struct, with save/load hooks ---- */
 typedef struct {
@@ -481,6 +483,70 @@ int main(void) {
 
     flow_free(a); flow_free(b); flow_free(c); flow_free(d);
     remove(P_VGARB);
+  }
+
+  /* ---- inc-9 #2: hostile-input hardening on load (numeric + id overflow) ----
+     flow_load is the only untrusted-bytes entry point. It restores the viewport via
+     flow__view_set DIRECTLY, which bypasses flow_set_zoom's [zmin,zmax] clamp, so a
+     corrupt/hostile file could store NaN/Inf/out-of-range zoom that then poisons the
+     (int)lroundf(...) render math; and flow__json_int used a bare (int)strtol, which
+     truncated out-of-range ids (silent collisions) and could overflow nextid=maxnid+1. */
+  {
+    const char *P_HARD = "/tmp/flow_json_hardening.json";
+    FILE *hf;
+
+    /* (a) overflow (Inf) zoom: load still succeeds and the stored zoom is FINITE + in-range */
+    hf = fopen(P_HARD, "wb");
+    fputs("{\"version\":1,\"viewport\":{\"ox\":0,\"oy\":0,\"zoom\":1e40},\"nodes\":[],\"edges\":[]}", hf);
+    fclose(hf);
+    flow_t *za = flow_new(80, 24); flow_register_defaults(za);
+    ASSERT_INT(flow_load(za, P_HARD), 0, "load with Inf zoom still succeeds");
+    ASSERT(isfinite(flow_zoom(za)), "Inf zoom sanitized to a finite value");
+    ASSERT(flow_zoom(za) >= 0.25f && flow_zoom(za) <= 4.0f, "Inf zoom clamped into [zmin,zmax]");
+    flow_free(za);
+
+    /* finite-but-huge zoom clamps to zmax (4.0) */
+    hf = fopen(P_HARD, "wb");
+    fputs("{\"version\":1,\"viewport\":{\"ox\":0,\"oy\":0,\"zoom\":1e30},\"nodes\":[],\"edges\":[]}", hf);
+    fclose(hf);
+    flow_t *zb = flow_new(80, 24); flow_register_defaults(zb);
+    ASSERT_INT(flow_load(zb, P_HARD), 0, "load with huge zoom succeeds");
+    ASSERT_INT((int)(flow_zoom(zb) * 100.0f), 400, "huge zoom clamped to zmax (4.0)");
+    flow_free(zb);
+
+    /* non-positive zoom sanitized to a positive in-range value (a 0 zoom would divide-by-zero
+       in world<->screen math) */
+    hf = fopen(P_HARD, "wb");
+    fputs("{\"version\":1,\"viewport\":{\"ox\":0,\"oy\":0,\"zoom\":-5},\"nodes\":[],\"edges\":[]}", hf);
+    fclose(hf);
+    flow_t *zc = flow_new(80, 24); flow_register_defaults(zc);
+    ASSERT_INT(flow_load(zc, P_HARD), 0, "load with negative zoom succeeds");
+    ASSERT(flow_zoom(zc) >= 0.25f, "negative zoom sanitized to a positive in-range value");
+    flow_free(zc);
+
+    /* (b) an out-of-int-range node id is CLAMPED to INT_MAX, not truncated to a small
+       colliding id (9999999999999 would (int)-truncate to ~1.3e9). */
+    hf = fopen(P_HARD, "wb");
+    fputs("{\"version\":1,\"nodes\":[{\"id\":9999999999999,\"type\":\"default\",\"x\":1,\"y\":1}],\"edges\":[]}", hf);
+    fclose(hf);
+    flow_t *ia = flow_new(80, 24); flow_register_defaults(ia);
+    ASSERT_INT(flow_load(ia, P_HARD), 0, "load with overflow node id succeeds");
+    ASSERT_INT(flow_node_count(ia), 1, "one node loaded");
+    ASSERT_INT(ia->nodes[0].id, INT_MAX, "overflow id clamped to INT_MAX (not truncated)");
+    flow_free(ia);
+
+    /* an id of exactly INT_MAX makes nextid = maxnid+1 a signed-overflow (UB, UBSan-gated):
+       it must SATURATE at INT_MAX, not wrap to INT_MIN. */
+    hf = fopen(P_HARD, "wb");
+    fputs("{\"version\":1,\"nodes\":[{\"id\":2147483647,\"type\":\"default\",\"x\":1,\"y\":1}],\"edges\":[]}", hf);
+    fclose(hf);
+    flow_t *ib = flow_new(80, 24); flow_register_defaults(ib);
+    ASSERT_INT(flow_load(ib, P_HARD), 0, "load with INT_MAX id succeeds");
+    ASSERT_INT(ib->nodes[0].id, INT_MAX, "INT_MAX id preserved");
+    ASSERT_INT(ib->nextid, INT_MAX, "nextid saturated at INT_MAX (no INT_MAX+1 overflow)");
+    flow_free(ib);
+
+    remove(P_HARD);
   }
 
   /* clean up temp files */
